@@ -1,9 +1,9 @@
 [package]
 name = "voltage_modbus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Evan Liu <evan.liu@voltageenergy.com>"]
-description = "High-performance Modbus TCP/RTU implementation for industrial automation and IoT applications"
+description = "High-performance Modbus TCP/RTU/ASCII implementation for industrial automation and IoT applications"
 license = "MIT"
 homepage = "https://github.com/voltage-llc/voltage_modbus"
 repository = "https://github.com/voltage-llc/voltage_modbus"
@@ -53,6 +53,7 @@ hex = "0.4"
 bytes = "1.4"
 byteorder = "1.5"
 crc = "3.0"
+rand = "0.8"
 
 # Time and async utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -94,6 +95,18 @@ path = "src/bin/server_demo.rs"
 [[bin]]
 name = "full_function_test"
 path = "src/bin/full_function_test.rs"
+
+[[bin]]
+name = "rtu_test"
+path = "src/bin/rtu_test.rs"
+
+[[bin]]
+name = "rtu_simulator"
+path = "src/bin/rtu_simulator.rs"
+
+[[bin]]
+name = "ascii_test"
+path = "src/bin/ascii_test.rs"
 
 [profile.release]
 lto = true

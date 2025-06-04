@@ -1,34 +1,74 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to Voltage Modbus library will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased][Unreleased]
-
-## [0.1.0][0.1.0] - 2025-05-29
+## [0.2.0] - 2024-06-04
 
 ### Added
-
-- Initial release of Voltage Modbus library
-- Complete Modbus TCP/RTU implementation in pure Rust
-- High-performance async/await support with Tokio
-- Full support for all standard Modbus function codes (0x01-0x10)
-- Thread-safe register bank for server applications
-- Comprehensive error handling and recovery
-- Extensive documentation and examples
-- GitHub Actions CI/CD pipeline
-- Automatic documentation deployment to GitHub Pages
+- **Modbus ASCII Transport Support** - Complete implementation of Modbus ASCII protocol
+  - `AsciiTransport` class with full ASCII frame encoding/decoding
+  - LRC (Longitudinal Redundancy Check) error detection
+  - Human-readable frame format for debugging and legacy system integration
+  - Configurable serial parameters (7/8 data bits, parity, stop bits)
+  - Inter-character timeout handling for ASCII frame reception
+  - Comprehensive ASCII frame validation and error handling
 
 ### Features
+- **ASCII Protocol Implementation**
+  - ASCII hex encoding/decoding utilities
+  - LRC checksum calculation and verification
+  - CR/LF frame termination handling
+  - Support for all standard Modbus functions in ASCII format
+  - Exception response handling in ASCII format
 
-- **Client Support**: All read/write operations for coils and registers
-- **Server Support**: Multi-client concurrent processing
-- **Protocol Support**: Modbus TCP with RTU framework
-- **Performance**: 1000+ requests/second, < 1ms latency
-- **Safety**: Zero unsafe code, memory safe implementation
-- **Testing**: Comprehensive test suite with 100% success rate
+- **Development Tools**
+  - `ascii_test` binary for testing and demonstration
+  - ASCII frame logger for debugging purposes
+  - Example ASCII frames for educational use
+  - Complete test suite for ASCII functionality
+
+### Use Cases
+- **Debugging**: Human-readable format for protocol troubleshooting
+- **Legacy Systems**: Integration with older SCADA systems that only support ASCII
+- **Educational**: Learning Modbus protocol structure with readable format
+- **Manual Testing**: Ability to type commands manually in serial terminals
+
+### Updated
+- Library documentation to include ASCII transport
+- Export statements to include `AsciiTransport`
+- Main library description to mention TCP/RTU/ASCII support
+- Comprehensive test coverage for ASCII functionality
+
+### Technical Details
+- ASCII frames use ':' start character and CR/LF termination
+- LRC calculated as two's complement of sum of data bytes
+- Default configuration: 7 data bits, even parity, 1 stop bit
+- Configurable timeouts for overall operation and inter-character delays
+- Full compatibility with existing `ModbusTransport` trait
+
+## [0.1.0] - 2024-06-03
+
+### Added
+- Initial release of Voltage Modbus library
+- **Modbus TCP Transport** - Complete TCP implementation with MBAP header handling
+- **Modbus RTU Transport** - Full RTU implementation with CRC-16 validation
+- **Protocol Layer** - Support for all standard Modbus function codes (0x01-0x10)
+- **Client/Server Architecture** - Async client and server implementations
+- **Register Bank** - Thread-safe register storage for server applications
+- **Error Handling** - Comprehensive error types and recovery mechanisms
+- **Performance Monitoring** - Built-in statistics and metrics
+- **Testing Framework** - Complete test suite and example applications
+
+### Features
+- Async/await support with Tokio
+- Zero-copy operations where possible
+- Thread-safe design for concurrent usage
+- Configurable timeouts and retry mechanisms
+- Comprehensive logging and debugging support
+- Production-ready reliability and performance
 
 ### Function Codes Supported
 
@@ -51,6 +91,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Author
 
 - Evan Liu <evan.liu@voltageenergy.com>
-
-[Unreleased]: https://github.com/voltage-llc/voltage_modbus/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/voltage-llc/voltage_modbus/releases/tag/v0.1.0

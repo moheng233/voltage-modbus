@@ -1,16 +1,16 @@
-//! # Voltage Modbus - High-Performance Modbus TCP/RTU Library
+//! # Voltage Modbus - High-Performance Modbus TCP/RTU/ASCII Library
 //! 
 //! **Author:** Evan Liu <evan.liu@voltageenergy.com>  
-//! **Version:** 0.1.0  
+//! **Version:** 0.2.0  
 //! **License:** MIT
 //! 
-//! A comprehensive, high-performance Modbus TCP/RTU implementation in pure Rust
+//! A comprehensive, high-performance Modbus TCP/RTU/ASCII implementation in pure Rust
 //! designed for industrial automation, IoT applications, and smart grid systems.
 //! 
 //! ## Features
 //! 
 //! - **🚀 High Performance**: Async/await support with Tokio for maximum throughput
-//! - **🔧 Complete Protocol Support**: Both Modbus TCP and RTU protocols
+//! - **🔧 Complete Protocol Support**: Modbus TCP, RTU, and ASCII protocols
 //! - **🛡️ Memory Safe**: Pure Rust implementation with zero unsafe code
 //! - **⚡ Zero-Copy Operations**: Optimized for minimal memory allocations
 //! - **🔄 Concurrent Processing**: Multi-client server support
@@ -141,7 +141,7 @@ pub mod utils;
 // Re-export main types for convenience
 pub use error::{ModbusError, ModbusResult};
 pub use protocol::{ModbusRequest, ModbusResponse, ModbusFunction};
-pub use transport::{ModbusTransport, TcpTransport, TransportStats};
+pub use transport::{ModbusTransport, TcpTransport, RtuTransport, AsciiTransport, TransportStats};
 pub use client::{ModbusClient, ModbusTcpClient};
 pub use server::{ModbusServer, ModbusTcpServer, ModbusTcpServerConfig, ServerStats};
 pub use register_bank::{ModbusRegisterBank, RegisterBankStats};
@@ -170,5 +170,5 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Get library information
 pub fn info() -> String {
-    format!("Voltage Modbus v{} - High-performance Modbus TCP/RTU library by Evan Liu", VERSION)
+    format!("Voltage Modbus v{} - High-performance Modbus TCP/RTU/ASCII library by Evan Liu", VERSION)
 } 

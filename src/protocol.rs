@@ -1,3 +1,90 @@
+//! # Modbus Protocol Implementation
+//! 
+//! This module provides comprehensive Modbus protocol support including:
+//! - Standard Modbus function codes (0x01-0x10)  
+//! - Request and response message structures
+//! - Data type conversions and validation
+//! - Exception handling and error codes
+//! 
+//! ## Supported Function Codes
+//! 
+//! ### Read Functions
+//! - **0x01**: Read Coils - Read 1 to 2000 contiguous coils
+//! - **0x02**: Read Discrete Inputs - Read 1 to 2000 contiguous discrete inputs  
+//! - **0x03**: Read Holding Registers - Read 1 to 125 contiguous holding registers
+//! - **0x04**: Read Input Registers - Read 1 to 125 contiguous input registers
+//! 
+//! ### Write Functions  
+//! - **0x05**: Write Single Coil - Write a single coil ON or OFF
+//! - **0x06**: Write Single Register - Write a single 16-bit register
+//! - **0x0F**: Write Multiple Coils - Write multiple coils (1 to 1968)
+//! - **0x10**: Write Multiple Registers - Write multiple registers (1 to 123)
+//! 
+//! ## Usage Examples
+//! 
+//! ### Creating Requests
+//! 
+//! ```rust
+//! use voltage_modbus::protocol::{ModbusRequest, ModbusFunction};
+//! 
+//! // Read 10 holding registers starting at address 100
+//! let read_request = ModbusRequest::new_read(
+//!     1,                                    // slave_id
+//!     ModbusFunction::ReadHoldingRegisters, // function
+//!     100,                                  // start_address  
+//!     10                                    // quantity
+//! );
+//! 
+//! // Write value 0x1234 to register 200  
+//! let write_request = ModbusRequest::new_write(
+//!     1,                                     // slave_id
+//!     ModbusFunction::WriteSingleRegister,   // function
+//!     200,                                   // address
+//!     vec![0x12, 0x34]                       // data (big-endian)
+//! );
+//! ```
+//! 
+//! ### Processing Responses
+//! 
+//! ```rust
+//! use voltage_modbus::protocol::{ModbusResponse, ModbusFunction};
+//! 
+//! # fn process_response() -> Result<(), Box<dyn std::error::Error>> {
+//! let response = ModbusResponse::new_success(
+//!     1,                                    // slave_id
+//!     ModbusFunction::ReadHoldingRegisters, // function
+//!     vec![0x12, 0x34, 0x56, 0x78]         // data
+//! );
+//! 
+//! if !response.is_exception() {
+//!     let registers = response.parse_registers()?;
+//!     println!("Read registers: {:?}", registers); // [0x1234, 0x5678]
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! ### Data Conversion Utilities
+//! 
+//! ```rust
+//! use voltage_modbus::protocol::data_utils::*;
+//! 
+//! // Convert 32-bit float to two 16-bit registers
+//! let value = 123.456f32;
+//! let registers = f32_to_registers(value);
+//! 
+//! // Convert registers back to float
+//! let restored = registers_to_f32(&registers)?;
+//! assert_eq!(value, restored);
+//! 
+//! // Pack boolean values into bytes
+//! let bits = vec![true, false, true, true, false, true, false, false];
+//! let packed = pack_bits(&bits);
+//! let unpacked = unpack_bits(&packed, 8);
+//! assert_eq!(bits, unpacked);
+//! # Ok::<(), voltage_modbus::ModbusError>(())
+//! ```
+
 /// Modbus protocol definitions and data structures
 /// 
 /// This module contains the core Modbus protocol definitions, including
