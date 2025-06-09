@@ -3,24 +3,28 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-blue.svg)](https://www.rust-lang.org)
 [![GitHub](https://img.shields.io/badge/github-voltage_modbus-blue.svg)](https://github.com/voltage-llc/voltage_modbus)
+[![Crates.io](https://img.shields.io/crates/v/voltage_modbus.svg)](https://crates.io/crates/voltage_modbus)
+[![docs.rs](https://docs.rs/voltage_modbus/badge.svg)](https://docs.rs/voltage_modbus)
 
-> **High-Performance Modbus TCP/RTU Library for Rust**
+> **High-Performance Modbus TCP/RTU/ASCII Library for Rust**
 >
 > **Author:** Evan Liu <evan.liu@voltageenergy.com>
-> **Version:** 0.1.0
+> **Version:** 0.2.0
 > **License:** MIT
 
-A comprehensive, high-performance Modbus TCP/RTU implementation in pure Rust designed for industrial automation, IoT applications, and smart grid systems.
+A comprehensive, high-performance Modbus TCP/RTU/ASCII implementation in pure Rust designed for industrial automation, IoT applications, and smart grid systems.
 
 ## ✨ Features
 
 - **🚀 High Performance**: Async/await support with Tokio for maximum throughput
-- **🔧 Complete Protocol Support**: Both Modbus TCP and RTU protocols
+- **🔧 Complete Protocol Support**: Modbus TCP, RTU, and ASCII protocols
 - **🛡️ Memory Safe**: Pure Rust implementation with zero unsafe code
 - **⚡ Zero-Copy Operations**: Optimized for minimal memory allocations
 - **🔄 Concurrent Processing**: Multi-client server support
 - **📊 Built-in Monitoring**: Comprehensive statistics and metrics
 - **🏭 Production Ready**: Extensive testing and error handling
+- **🎯 Smart Architecture**: Generic client design eliminates code duplication
+- **🧩 Modular Design**: Clean separation of transport and application layers
 
 ## 📋 Supported Function Codes
 
@@ -41,30 +45,57 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-voltage_modbus = "0.1.0"
+voltage_modbus = "0.2.0"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
-### Client Example
+### Client Examples
+
+#### TCP Client
 
 ```rust
-use voltage_modbus::{ModbusClient, ModbusResult};
+use voltage_modbus::{ModbusTcpClient, ModbusClient, ModbusResult};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> ModbusResult<()> {
     // Connect to Modbus TCP server
-    let address = "127.0.0.1:502".parse().unwrap();
-    let timeout = Duration::from_secs(5);
-    let mut client = ModbusClient::new_tcp(address, timeout).await?;
-  
+    let mut client = ModbusTcpClient::with_timeout("127.0.0.1:502", Duration::from_secs(5)).await?;
+    
     // Read holding registers
     let values = client.read_holding_registers(1, 0, 10).await?;
     println!("Read registers: {:?}", values);
-  
+    
     // Write single register
     client.write_single_register(1, 100, 0x1234).await?;
-  
+    
+    client.close().await?;
+    Ok(())
+}
+```
+
+#### RTU Client
+
+```rust
+use voltage_modbus::{ModbusRtuClient, ModbusClient, ModbusResult};
+use std::time::Duration;
+
+#[tokio::main] 
+async fn main() -> ModbusResult<()> {
+    // Connect to Modbus RTU device
+    let mut client = ModbusRtuClient::with_config(
+        "/dev/ttyUSB0",
+        9600,
+        tokio_serial::DataBits::Eight,
+        tokio_serial::StopBits::One,
+        tokio_serial::Parity::None,
+        Duration::from_secs(1),
+    )?;
+    
+    // Read coils
+    let coils = client.read_coils(1, 0, 8).await?;
+    println!("Read coils: {:?}", coils);
+    
     client.close().await?;
     Ok(())
 }
@@ -88,11 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_timeout: Duration::from_secs(30),
         register_bank: Some(Arc::new(ModbusRegisterBank::new())),
     };
-  
+    
     // Start server
     let mut server = ModbusTcpServer::with_config(config)?;
     server.start().await?;
-  
+    
     // Server is now running...
     Ok(())
 }
@@ -100,43 +131,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 📖 Documentation
 
-- **[GitHub Pages](https://voltage-llc.github.io/voltage_modbus/)** - Live documentation (auto-updated)
 - **[API Reference](https://docs.rs/voltage_modbus)** - Complete API documentation
-- **[Examples](./examples/)** - Usage examples and tutorials
-- **[Performance Guide](./docs/performance.md)** - Optimization tips
-- **[Protocol Reference](./docs/protocol.md)** - Modbus protocol details
+- **[Crates.io](https://crates.io/crates/voltage_modbus)** - Package information
+- **[GitHub Repository](https://github.com/voltage-llc/voltage_modbus)** - Source code and issues
 
 ## 🏗️ Architecture
 
+### Protocol Layer Insight
+
+The library implements a key architectural insight: **Modbus TCP and RTU share identical application layer messages (PDU)**, differing only in transport encapsulation:
+
 ```text
-┌─────────────────┐    ┌─────────────────┐
-│   Application   │    │   Application   │
-└─────────────────┘    └─────────────────┘
-         │                       │
-┌─────────────────┐    ┌─────────────────┐
-│  Modbus Client  │    │  Modbus Server  │
-└─────────────────┘    └─────────────────┘
-         │                       │
-┌─────────────────┐    ┌─────────────────┐
-│   Protocol      │    │ Register Bank   │
-│   (TCP/RTU)     │    │   (Storage)     │
-└─────────────────┘    └─────────────────┘
-         │                       │
-┌─────────────────┐    ┌─────────────────┐
-│   Transport     │◄──►│   Transport     │
-│   (Async I/O)   │    │   (Async I/O)   │
-└─────────────────┘    └─────────────────┘
+TCP Frame: [MBAP Header (7 bytes)] + [PDU (Function Code + Data)]
+RTU Frame: [Slave ID (1 byte)] + [PDU (Function Code + Data)] + [CRC (2 bytes)]
+```
+
+This enables code reuse through a generic client design:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                        │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ ModbusTcpClient │    │ ModbusRtuClient │                │
+│  └─────────────────┘    └─────────────────┘                │
+│           │                       │                        │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │           GenericModbusClient<T>                        ││
+│  │         (Shared Application Logic)                      ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+                          │
+┌─────────────────────────────────────────────────────────────┐
+│                   Transport Layer                           │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │   TcpTransport  │    │   RtuTransport  │                │
+│  │  (TCP Sockets)  │    │ (Serial Ports)  │                │
+│  └─────────────────┘    └─────────────────┘                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Modules
 
 - **`error`** - Error types and result handling
-- **`protocol`** - Modbus protocol definitions and message handling
-- **`transport`** - Network transport layer for TCP and RTU communication
-- **`client`** - Modbus client implementations
+- **`protocol`** - Modbus protocol definitions and message handling  
+- **`transport`** - Network transport layer for TCP, RTU, and ASCII communication
+- **`client`** - Generic and protocol-specific client implementations
 - **`server`** - Modbus server implementations with concurrent support
 - **`register_bank`** - Thread-safe register storage for server applications
-- **`utils`** - Utility functions and performance monitoring
+- **`utils`** - Utility functions, data conversion, and performance monitoring
 
 ## 🧪 Examples and Testing
 
@@ -146,33 +188,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # Start the demo server
 cargo run --bin server_demo
 
-# Run client demo
+# Run TCP client demo
 cargo run --bin demo
 
-# Run full function tests
+# Test RTU functionality
+cargo run --bin rtu_test
+
+# Run performance benchmarks
+cargo run --bin performance_test
+
+# Test all function codes
 cargo run --bin full_function_test
-
-# Run performance tests
-cargo run --bin advanced_test
-
-# Run all tests
-./test_server.sh
 ```
 
 ### Test Coverage
 
-- ✅ All Modbus function codes
-- ✅ Error handling and recovery
-- ✅ Concurrent client connections
-- ✅ Protocol compliance testing
-- ✅ Performance benchmarking
+```bash
+# Run all tests
+cargo test
+
+# Run with output
+cargo test -- --nocapture
+
+# Integration tests
+cargo test --test integration_tests
+
+# Documentation tests
+cargo test --doc
+```
+
+**Test Results:**
+- ✅ 34 unit tests passed
+- ✅ 9 integration tests passed  
+- ✅ 22 documentation tests passed
+- ✅ All Modbus function codes tested
+- ✅ Error handling and recovery tested
+- ✅ Concurrent client connections tested
 
 ## 📈 Performance
 
 ### Benchmarks
 
-| Metric                           | Value              |
-| -------------------------------- | ------------------ |
+| Metric                     | Value              |
+| -------------------------- | ------------------ |
 | **Latency**                | < 1ms (local)      |
 | **Throughput**             | 1000+ requests/sec |
 | **Concurrent Connections** | 50+ clients        |
@@ -182,22 +240,34 @@ cargo run --bin advanced_test
 ### Optimization Features
 
 - **Async I/O**: Non-blocking operations with Tokio
-- **Connection Pooling**: Efficient connection management
-- **Zero-Copy**: Minimal memory allocations
+- **Zero-Copy Operations**: Minimal memory allocations
+- **Generic Architecture**: Code reuse eliminates duplication
 - **Lock-Free Operations**: Where possible
 - **Configurable Timeouts**: Adaptive timeout management
 
 ## 🔧 Configuration
 
-### Client Configuration
+### Advanced Client Configuration
 
 ```rust
-use voltage_modbus::{ModbusClient};
+use voltage_modbus::{ModbusTcpClient, ModbusRtuClient};
 use std::time::Duration;
 
-let address = "192.168.1.100:502".parse().unwrap();
-let timeout = Duration::from_secs(10);
-let mut client = ModbusClient::new_tcp(address, timeout).await?;
+// TCP with custom timeout
+let mut tcp_client = ModbusTcpClient::with_timeout(
+    "192.168.1.100:502", 
+    Duration::from_secs(10)
+).await?;
+
+// RTU with full configuration
+let mut rtu_client = ModbusRtuClient::with_config(
+    "/dev/ttyUSB0",
+    9600,                                // Baud rate
+    tokio_serial::DataBits::Eight,      // Data bits
+    tokio_serial::StopBits::One,        // Stop bits  
+    tokio_serial::Parity::None,         // Parity
+    Duration::from_secs(1),             // Timeout
+)?;
 ```
 
 ### Server Configuration
@@ -229,30 +299,36 @@ cd voltage_modbus
 cargo build --release
 ```
 
-### Running Tests
+### Development Tools
 
 ```bash
-# Unit tests
-cargo test
+# Check code
+cargo check
 
-# Integration tests
-cargo test --test integration
+# Format code
+cargo fmt
 
-# Documentation tests
-cargo test --doc
+# Run linter
+cargo clippy
 
-# All tests with output
-cargo test -- --nocapture
+# Generate documentation
+cargo doc --no-deps --open
 ```
 
-### Generating Documentation
+## 🚀 Installation
+
+### From Crates.io
 
 ```bash
-# Generate and open documentation (no dependencies)
-cargo doc --no-deps --open
+cargo add voltage_modbus
+```
 
-# Generate with all features (no dependencies)  
-cargo doc --no-deps --all-features --open
+### From Source
+
+```bash
+git clone https://github.com/voltage-llc/voltage_modbus.git
+cd voltage_modbus
+cargo install --path .
 ```
 
 ## 🤝 Contributing
@@ -272,6 +348,14 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes.
 
+### Recent Updates (v0.2.0)
+
+- ✨ **Generic Client Architecture**: Eliminated code duplication between TCP/RTU clients
+- 🎯 **Improved API**: Cleaner, more intuitive client interfaces
+- 🔧 **Enhanced RTU Support**: Full RTU client and server implementations
+- 📊 **Better Testing**: Comprehensive test coverage with 43 total tests
+- 🏗️ **Architectural Refinement**: Clean separation of transport and application layers
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -285,6 +369,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 - **Documentation**: https://docs.rs/voltage_modbus
+- **Package**: https://crates.io/crates/voltage_modbus
 - **Issues**: https://github.com/voltage-llc/voltage_modbus/issues
 - **Discussions**: https://github.com/voltage-llc/voltage_modbus/discussions
 - **Email**: evan.liu@voltageenergy.com

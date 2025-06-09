@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::timeout;
 use log::{info, error, debug, warn};
+use tokio_serial;
 
 use crate::error::{ModbusError, ModbusResult};
 use crate::protocol::{ModbusRequest, ModbusResponse, ModbusFunction};
@@ -42,7 +43,7 @@ pub trait ModbusServer: Send + Sync {
 }
 
 /// Server statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ServerStats {
     pub connections_count: u64,
     pub total_requests: u64,
@@ -54,20 +55,6 @@ pub struct ServerStats {
     pub register_bank_stats: Option<RegisterBankStats>,
 }
 
-impl Default for ServerStats {
-    fn default() -> Self {
-        Self {
-            connections_count: 0,
-            total_requests: 0,
-            successful_requests: 0,
-            failed_requests: 0,
-            bytes_received: 0,
-            bytes_sent: 0,
-            uptime_seconds: 0,
-            register_bank_stats: None,
-        }
-    }
-}
 
 /// Modbus TCP server configuration
 #[derive(Debug, Clone)]
@@ -622,37 +609,523 @@ impl ModbusServer for ModbusTcpServer {
     }
 }
 
-/// Modbus RTU server (placeholder for future implementation)
+/// Modbus RTU server configuration
+#[derive(Debug, Clone)]
+pub struct ModbusRtuServerConfig {
+    pub port: String,
+    pub baud_rate: u32,
+    pub data_bits: tokio_serial::DataBits,
+    pub stop_bits: tokio_serial::StopBits,
+    pub parity: tokio_serial::Parity,
+    pub timeout: Duration,
+    pub frame_gap: Duration,
+    pub register_bank: Option<Arc<ModbusRegisterBank>>,
+}
+
+impl Default for ModbusRtuServerConfig {
+    fn default() -> Self {
+        Self {
+            port: "/dev/ttyUSB0".to_string(),
+            baud_rate: 9600,
+            data_bits: tokio_serial::DataBits::Eight,
+            stop_bits: tokio_serial::StopBits::One,
+            parity: tokio_serial::Parity::None,
+            timeout: Duration::from_secs(1),
+            frame_gap: Duration::from_millis(4), // Default 3.5 char time at 9600 baud
+            register_bank: None,
+        }
+    }
+}
+
+/// Modbus RTU server implementation
 pub struct ModbusRtuServer {
-    // RTU server implementation fields would go here
+    config: ModbusRtuServerConfig,
+    register_bank: Arc<ModbusRegisterBank>,
+    stats: Arc<Mutex<ServerStats>>,
+    shutdown_tx: Option<broadcast::Sender<()>>,
+    is_running: Arc<Mutex<bool>>,
+    start_time: Option<std::time::Instant>,
 }
 
 impl ModbusRtuServer {
-    /// Create a new RTU server
-    pub fn new(_port: &str, _baud_rate: u32) -> ModbusResult<Self> {
-        Ok(Self {})
+    /// Create a new RTU server with default configuration
+    pub fn new(port: &str, baud_rate: u32) -> ModbusResult<Self> {
+        let config = ModbusRtuServerConfig {
+            port: port.to_string(),
+            baud_rate,
+            ..Default::default()
+        };
+        
+        Self::with_config(config)
+    }
+    
+    /// Create a new RTU server with custom configuration
+    pub fn with_config(config: ModbusRtuServerConfig) -> ModbusResult<Self> {
+        let register_bank = config.register_bank.clone()
+            .unwrap_or_else(|| Arc::new(ModbusRegisterBank::new()));
+        
+        Ok(Self {
+            config,
+            register_bank,
+            stats: Arc::new(Mutex::new(ServerStats::default())),
+            shutdown_tx: None,
+            is_running: Arc::new(Mutex::new(false)),
+            start_time: None,
+        })
+    }
+    
+    /// Set custom register bank
+    pub fn set_register_bank(&mut self, register_bank: Arc<ModbusRegisterBank>) {
+        self.register_bank = register_bank;
+    }
+    
+    /// Calculate CRC for RTU frames
+    fn calculate_crc(data: &[u8]) -> u16 {
+        use crc::{Crc, CRC_16_MODBUS};
+        const CRC_MODBUS: Crc<u16> = Crc::<u16>::new(&CRC_16_MODBUS);
+        CRC_MODBUS.checksum(data)
+    }
+    
+    /// Process RTU frame
+    async fn process_rtu_frame(
+        frame: &[u8],
+        register_bank: &Arc<ModbusRegisterBank>,
+    ) -> ModbusResult<Vec<u8>> {
+        if frame.len() < 4 {
+            return Err(ModbusError::frame("RTU frame too short"));
+        }
+        
+        // Extract CRC from frame
+        let data_len = frame.len() - 2;
+        let data = &frame[..data_len];
+        let received_crc = u16::from_le_bytes([frame[data_len], frame[data_len + 1]]);
+        
+        // Verify CRC
+        let calculated_crc = Self::calculate_crc(data);
+        if received_crc != calculated_crc {
+            return Err(ModbusError::frame("Invalid CRC"));
+        }
+        
+        if data.len() < 2 {
+            return Err(ModbusError::frame("Invalid RTU frame"));
+        }
+        
+        let slave_id = data[0];
+        let function_code = data[1];
+        let pdu_data = &data[2..];
+        
+        debug!("Processing RTU request: Slave={}, Function=0x{:02x}", slave_id, function_code);
+        
+        // Process based on function code
+        let response_data = match function_code {
+            0x01 => Self::handle_read_coils(pdu_data, register_bank).await?,
+            0x02 => Self::handle_read_discrete_inputs(pdu_data, register_bank).await?,
+            0x03 => Self::handle_read_holding_registers(pdu_data, register_bank).await?,
+            0x04 => Self::handle_read_input_registers(pdu_data, register_bank).await?,
+            0x05 => Self::handle_write_single_coil(pdu_data, register_bank).await?,
+            0x06 => Self::handle_write_single_register(pdu_data, register_bank).await?,
+            0x0F => Self::handle_write_multiple_coils(pdu_data, register_bank).await?,
+            0x10 => Self::handle_write_multiple_registers(pdu_data, register_bank).await?,
+            _ => {
+                return Self::create_rtu_error_response(slave_id, function_code, 0x01);
+            }
+        };
+        
+        // Create response frame
+        let mut response = Vec::new();
+        response.push(slave_id);
+        response.push(function_code);
+        response.extend_from_slice(&response_data);
+        
+        // Add CRC
+        let crc = Self::calculate_crc(&response);
+        response.extend_from_slice(&crc.to_le_bytes());
+        
+        Ok(response)
+    }
+    
+    /// Create RTU error response
+    fn create_rtu_error_response(slave_id: u8, function_code: u8, exception_code: u8) -> ModbusResult<Vec<u8>> {
+        let mut response = Vec::new();
+        response.push(slave_id);
+        response.push(function_code | 0x80); // Set exception bit
+        response.push(exception_code);
+        
+        let crc = Self::calculate_crc(&response);
+        response.extend_from_slice(&crc.to_le_bytes());
+        
+        Ok(response)
+    }
+    
+    /// Handle RTU communication loop
+    async fn handle_rtu_communication(
+        mut port: tokio_serial::SerialStream,
+        register_bank: Arc<ModbusRegisterBank>,
+        stats: Arc<Mutex<ServerStats>>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        frame_gap: Duration,
+    ) {
+        info!("🔌 RTU server communication started");
+        
+        let mut buffer = vec![0u8; 256];
+        let mut frame_buffer = Vec::new();
+        let mut last_activity = std::time::Instant::now();
+        
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    debug!("Shutdown signal received for RTU server");
+                    break;
+                }
+                
+                result = tokio::time::timeout(Duration::from_millis(100), port.read(&mut buffer)) => {
+                    match result {
+                        Ok(Ok(bytes_read)) if bytes_read > 0 => {
+                            let now = std::time::Instant::now();
+                            
+                            // Check for frame gap
+                            if now.duration_since(last_activity) > frame_gap && !frame_buffer.is_empty() {
+                                // Process accumulated frame
+                                Self::process_accumulated_frame(
+                                    &frame_buffer,
+                                    &mut port,
+                                    &register_bank,
+                                    &stats
+                                ).await;
+                                frame_buffer.clear();
+                            }
+                            
+                            // Accumulate data
+                            frame_buffer.extend_from_slice(&buffer[..bytes_read]);
+                            last_activity = now;
+                            
+                            // Update stats
+                            {
+                                let mut stats = stats.lock().await;
+                                stats.bytes_received += bytes_read as u64;
+                            }
+                        }
+                        Ok(Ok(_)) => {
+                            // No data read, but successful read operation
+                        }
+                        Ok(Err(e)) => {
+                            error!("RTU read error: {}", e);
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - check if we have a complete frame
+                            let now = std::time::Instant::now();
+                            if !frame_buffer.is_empty() && now.duration_since(last_activity) > frame_gap {
+                                Self::process_accumulated_frame(
+                                    &frame_buffer,
+                                    &mut port,
+                                    &register_bank,
+                                    &stats
+                                ).await;
+                                frame_buffer.clear();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("🔌 RTU server communication stopped");
+    }
+    
+    /// Process accumulated frame data
+    async fn process_accumulated_frame(
+        frame: &[u8],
+        port: &mut tokio_serial::SerialStream,
+        register_bank: &Arc<ModbusRegisterBank>,
+        stats: &Arc<Mutex<ServerStats>>,
+    ) {
+        // Update request stats
+        {
+            let mut stats = stats.lock().await;
+            stats.total_requests += 1;
+        }
+        
+        match Self::process_rtu_frame(frame, register_bank).await {
+            Ok(response) => {
+                if let Err(e) = port.write_all(&response).await {
+                    error!("Failed to send RTU response: {}", e);
+                    let mut stats = stats.lock().await;
+                    stats.failed_requests += 1;
+                } else {
+                    let mut stats = stats.lock().await;
+                    stats.successful_requests += 1;
+                    stats.bytes_sent += response.len() as u64;
+                }
+            }
+            Err(e) => {
+                error!("Error processing RTU request: {}", e);
+                
+                // Try to send error response if we can determine slave ID and function
+                if frame.len() >= 2 {
+                    if let Ok(error_response) = Self::create_rtu_error_response(frame[0], frame[1], 0x01) {
+                        let _ = port.write_all(&error_response).await;
+                    }
+                }
+                
+                let mut stats = stats.lock().await;
+                stats.failed_requests += 1;
+            }
+        }
+    }
+    
+    // Reuse the same handler methods from TCP server
+    async fn handle_read_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_coils(data, register_bank).await
+    }
+    
+    async fn handle_read_discrete_inputs(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_discrete_inputs(data, register_bank).await
+    }
+    
+    async fn handle_read_holding_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_holding_registers(data, register_bank).await
+    }
+    
+    async fn handle_read_input_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_input_registers(data, register_bank).await
+    }
+    
+    async fn handle_write_single_coil(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_single_coil(data, register_bank).await
+    }
+    
+    async fn handle_write_single_register(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_single_register(data, register_bank).await
+    }
+    
+    async fn handle_write_multiple_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_multiple_coils(data, register_bank).await
+    }
+    
+    async fn handle_write_multiple_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_multiple_registers(data, register_bank).await
     }
 }
 
+/// Modbus RTU server implementation
+/// 
+/// Note: This is a placeholder for future implementation
 #[async_trait]
 impl ModbusServer for ModbusRtuServer {
     async fn start(&mut self) -> ModbusResult<()> {
-        Err(ModbusError::protocol("RTU server not implemented yet"))
+        let mut is_running = self.is_running.lock().await;
+        if *is_running {
+            return Err(ModbusError::protocol("RTU Server is already running"));
+        }
+        
+        info!("🚀 Starting Modbus RTU server on {}", self.config.port);
+        
+        // Create serial port connection
+        let port = tokio_serial::SerialStream::open(&tokio_serial::new(&self.config.port, self.config.baud_rate)
+            .data_bits(self.config.data_bits)
+            .stop_bits(self.config.stop_bits)
+            .parity(self.config.parity)
+            .timeout(self.config.timeout))
+            .map_err(|e| ModbusError::connection(format!("Failed to open serial port {}: {}", self.config.port, e)))?;
+        
+        let (shutdown_tx, _) = broadcast::channel(1);
+        self.shutdown_tx = Some(shutdown_tx.clone());
+        self.start_time = Some(std::time::Instant::now());
+        
+        *is_running = true;
+        drop(is_running);
+        
+        info!("✅ Modbus RTU server started successfully");
+        info!("📊 Server configuration:");
+        info!("   - Port: {}", self.config.port);
+        info!("   - Baud rate: {}", self.config.baud_rate);
+        info!("   - Data bits: {:?}", self.config.data_bits);
+        info!("   - Stop bits: {:?}", self.config.stop_bits);
+        info!("   - Parity: {:?}", self.config.parity);
+        info!("   - Timeout: {:?}", self.config.timeout);
+        
+        let register_bank = self.register_bank.clone();
+        let stats = self.stats.clone();
+        let frame_gap = self.config.frame_gap;
+        let is_running_flag = self.is_running.clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        
+        tokio::spawn(async move {
+            Self::handle_rtu_communication(port, register_bank, stats, shutdown_rx, frame_gap).await;
+            
+            let mut is_running = is_running_flag.lock().await;
+            *is_running = false;
+        });
+        
+        Ok(())
     }
     
     async fn stop(&mut self) -> ModbusResult<()> {
+        if let Some(shutdown_tx) = &self.shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+        
+        let mut is_running = self.is_running.lock().await;
+        *is_running = false;
+        
+        info!("⏹️  Modbus RTU server stopped");
         Ok(())
     }
     
     fn is_running(&self) -> bool {
-        false
+        // Note: This is a synchronous method, so we can't use async lock
+        // In a real implementation, you might want to use a different approach
+        false // Placeholder
     }
     
     fn get_stats(&self) -> ServerStats {
-        ServerStats::default()
+        // Note: This is a synchronous method, so we can't use async lock
+        // In a real implementation, you might want to use a different approach
+        let mut stats = ServerStats::default();
+        
+        if let Some(start_time) = self.start_time {
+            stats.uptime_seconds = start_time.elapsed().as_secs();
+        }
+        
+        stats.register_bank_stats = Some(self.register_bank.get_stats());
+        stats
     }
     
     fn get_register_bank(&self) -> Option<Arc<ModbusRegisterBank>> {
-        None
+        Some(self.register_bank.clone())
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    
+    #[test]
+    fn test_tcp_server_creation() {
+        // Test TCP server creation
+        let result = ModbusTcpServer::new("127.0.0.1:5020");
+        assert!(result.is_ok());
+        
+        let server = result.unwrap();
+        assert!(!server.is_running());
+        assert!(server.get_register_bank().is_some());
+    }
+    
+    #[test]
+    fn test_rtu_server_creation() {
+        // Test RTU server creation
+        let result = ModbusRtuServer::new("/dev/ttyUSB0", 9600);
+        assert!(result.is_ok());
+        
+        let server = result.unwrap();
+        assert!(!server.is_running());
+        assert!(server.get_register_bank().is_some());
+    }
+    
+    #[test]
+    fn test_rtu_server_configuration() {
+        // Test RTU server with custom configuration
+        let config = ModbusRtuServerConfig {
+            port: "/dev/ttyUSB0".to_string(),
+            baud_rate: 19200,
+            data_bits: tokio_serial::DataBits::Eight,
+            stop_bits: tokio_serial::StopBits::Two,
+            parity: tokio_serial::Parity::Even,
+            timeout: Duration::from_secs(2),
+            frame_gap: Duration::from_millis(5),
+            register_bank: None,
+        };
+        
+        let result = ModbusRtuServer::with_config(config);
+        assert!(result.is_ok());
+        
+        let server = result.unwrap();
+        assert!(!server.is_running());
+    }
+    
+    #[tokio::test]
+    async fn test_rtu_server_lifecycle() {
+        // Test RTU server start/stop lifecycle
+        let mut server = ModbusRtuServer::new("/dev/ttyUSB0", 9600).unwrap();
+        
+        // Server should not be running initially
+        assert!(!server.is_running());
+        
+        // Try to start server (will fail without actual serial port)
+        let start_result = server.start().await;
+        
+        if start_result.is_ok() {
+            // If start succeeded (unlikely without hardware), test stop
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let stop_result = server.stop().await;
+            assert!(stop_result.is_ok());
+        } else {
+            // Expected to fail without actual hardware
+            println!("RTU server start failed (expected without serial port): {:?}", start_result.err());
+        }
+    }
+    
+    #[test]
+    fn test_crc_calculation() {
+        // Test CRC calculation function
+        let test_data = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x02];
+        let crc = ModbusRtuServer::calculate_crc(&test_data);
+        
+        // CRC should be consistent
+        assert_eq!(crc, ModbusRtuServer::calculate_crc(&test_data));
+        
+        // Different data should give different CRC
+        let test_data2 = vec![0x01, 0x04, 0x00, 0x00, 0x00, 0x01];
+        let crc2 = ModbusRtuServer::calculate_crc(&test_data2);
+        assert_ne!(crc, crc2);
+    }
+    
+    #[test]
+    fn test_rtu_error_response() {
+        // Test RTU error response creation
+        let result = ModbusRtuServer::create_rtu_error_response(0x01, 0x03, 0x01);
+        assert!(result.is_ok());
+        
+        let response = result.unwrap();
+        assert_eq!(response[0], 0x01); // Slave ID
+        assert_eq!(response[1], 0x83); // Function code with error bit
+        assert_eq!(response[2], 0x01); // Exception code
+        assert_eq!(response.len(), 5); // Slave + Function + Exception + CRC (2 bytes)
+    }
+    
+    #[tokio::test]
+    async fn test_server_stats() {
+        // Test server statistics
+        let server = ModbusTcpServer::new("127.0.0.1:5021").unwrap();
+        let stats = server.get_stats();
+        
+        // Initial stats should be zero
+        assert_eq!(stats.connections_count, 0);
+        assert_eq!(stats.total_requests, 0);
+        assert_eq!(stats.successful_requests, 0);
+        assert_eq!(stats.failed_requests, 0);
+    }
+    
+    #[test]
+    fn test_register_bank_integration() {
+        // Test server with custom register bank
+        let register_bank = Arc::new(ModbusRegisterBank::new());
+        
+        // Set some test values
+        register_bank.write_single_coil(0, true).unwrap();
+        register_bank.write_single_register(0, 0x1234).unwrap();
+        
+        let mut server = ModbusTcpServer::new("127.0.0.1:5022").unwrap();
+        server.set_register_bank(register_bank.clone());
+        
+        // Verify register bank is set
+        let server_bank = server.get_register_bank().unwrap();
+        let coils = server_bank.read_coils(0, 1).unwrap();
+        let registers = server_bank.read_holding_registers(0, 1).unwrap();
+        
+        assert_eq!(coils[0], true);
+        assert_eq!(registers[0], 0x1234);
+    }
+}

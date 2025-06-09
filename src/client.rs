@@ -2,6 +2,13 @@
 /// 
 /// This module provides user-friendly client interfaces for Modbus communication,
 /// abstracting away the low-level protocol details.
+/// 
+/// The key insight is that Modbus TCP and RTU share the same application layer (PDU),
+/// differing only in transport layer encapsulation:
+/// - TCP: MBAP Header + PDU
+/// - RTU: Slave ID + PDU + CRC
+/// 
+/// This allows us to implement the application logic once and reuse it for both transports.
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -49,35 +56,29 @@ pub trait ModbusClient: Send + Sync {
     fn get_stats(&self) -> TransportStats;
 }
 
-/// Modbus TCP client implementation
-pub struct ModbusTcpClient {
-    transport: TcpTransport,
+/// Generic Modbus client that works with any transport
+/// 
+/// This client implements the common application layer logic (PDU construction and parsing)
+/// while delegating transport-specific concerns to the underlying transport implementation.
+/// This eliminates code duplication between TCP and RTU clients since the PDU is identical.
+pub struct GenericModbusClient<T: ModbusTransport> {
+    transport: T,
 }
 
-impl ModbusTcpClient {
-    /// Create a new Modbus TCP client
-    pub async fn new(address: &str) -> ModbusResult<Self> {
-        Self::with_timeout(address, Duration::from_millis(crate::DEFAULT_TIMEOUT_MS)).await
-    }
-    
-    /// Create a new Modbus TCP client with custom timeout
-    pub async fn with_timeout(address: &str, timeout: Duration) -> ModbusResult<Self> {
-        let socket_addr = SocketAddr::from_str(address)
-            .map_err(|e| ModbusError::configuration(format!("Invalid address '{}': {}", address, e)))?;
-            
-        let transport = TcpTransport::new(socket_addr, timeout).await?;
-        
-        Ok(Self { transport })
-    }
-    
-    /// Create from existing TcpTransport
-    pub fn from_transport(transport: TcpTransport) -> Self {
+impl<T: ModbusTransport> GenericModbusClient<T> {
+    /// Create a new generic client with the specified transport
+    pub fn new(transport: T) -> Self {
         Self { transport }
     }
     
-    /// Get the server address
-    pub fn server_address(&self) -> SocketAddr {
-        self.transport.address
+    /// Get a reference to the underlying transport
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+    
+    /// Get a mutable reference to the underlying transport
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
     
     /// Execute a raw request
@@ -87,7 +88,7 @@ impl ModbusTcpClient {
 }
 
 #[async_trait]
-impl ModbusClient for ModbusTcpClient {
+impl<T: ModbusTransport + Send + Sync> ModbusClient for GenericModbusClient<T> {
     async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
         if quantity == 0 || quantity > crate::MAX_COILS_PER_REQUEST {
             return Err(ModbusError::invalid_address(address, quantity));
@@ -231,63 +232,177 @@ impl ModbusClient for ModbusTcpClient {
     }
 }
 
-/// Modbus RTU client implementation (placeholder)
+/// Modbus TCP client implementation using the generic client
+pub struct ModbusTcpClient {
+    inner: GenericModbusClient<TcpTransport>,
+}
+
+impl ModbusTcpClient {
+    /// Create a new Modbus TCP client
+    pub async fn new(address: &str) -> ModbusResult<Self> {
+        Self::with_timeout(address, Duration::from_millis(crate::DEFAULT_TIMEOUT_MS)).await
+    }
+    
+    /// Create a new Modbus TCP client with custom timeout
+    pub async fn with_timeout(address: &str, timeout: Duration) -> ModbusResult<Self> {
+        let socket_addr = SocketAddr::from_str(address)
+            .map_err(|e| ModbusError::configuration(format!("Invalid address '{}': {}", address, e)))?;
+            
+        let transport = TcpTransport::new(socket_addr, timeout).await?;
+        
+        Ok(Self { inner: GenericModbusClient::new(transport) })
+    }
+    
+    /// Create from existing TcpTransport
+    pub fn from_transport(transport: TcpTransport) -> Self {
+        Self { inner: GenericModbusClient::new(transport) }
+    }
+    
+    /// Get the server address
+    pub fn server_address(&self) -> SocketAddr {
+        self.inner.transport().address
+    }
+    
+    /// Execute a raw request
+    pub async fn execute_request(&mut self, request: ModbusRequest) -> ModbusResult<ModbusResponse> {
+        self.inner.execute_request(request).await
+    }
+}
+
+#[async_trait]
+impl ModbusClient for ModbusTcpClient {
+    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_coils(slave_id, address, quantity).await
+    }
+    
+    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_discrete_inputs(slave_id, address, quantity).await
+    }
+    
+    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_holding_registers(slave_id, address, quantity).await
+    }
+    
+    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_input_registers(slave_id, address, quantity).await
+    }
+    
+    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        self.inner.write_single_coil(slave_id, address, value).await
+    }
+    
+    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        self.inner.write_single_register(slave_id, address, value).await
+    }
+    
+    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        self.inner.write_multiple_coils(slave_id, address, values).await
+    }
+    
+    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        self.inner.write_multiple_registers(slave_id, address, values).await
+    }
+    
+    fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+    
+    async fn close(&mut self) -> ModbusResult<()> {
+        self.inner.close().await
+    }
+    
+    fn get_stats(&self) -> TransportStats {
+        self.inner.get_stats()
+    }
+}
+
+/// Modbus RTU client implementation using the generic client
 pub struct ModbusRtuClient {
-    transport: RtuTransport,
+    inner: GenericModbusClient<RtuTransport>,
 }
 
 impl ModbusRtuClient {
-    /// Create a new Modbus RTU client
+    /// Create a new Modbus RTU client with default settings
     pub fn new(port: &str, baud_rate: u32) -> ModbusResult<Self> {
         let transport = RtuTransport::new(port, baud_rate)?;
-        Ok(Self { transport })
+        Ok(Self { inner: GenericModbusClient::new(transport) })
+    }
+    
+    /// Create a new Modbus RTU client with custom configuration
+    pub fn with_config(
+        port: &str,
+        baud_rate: u32,
+        data_bits: tokio_serial::DataBits,
+        stop_bits: tokio_serial::StopBits,
+        parity: tokio_serial::Parity,
+        timeout: Duration,
+    ) -> ModbusResult<Self> {
+        let transport = RtuTransport::new_with_config(
+            port, baud_rate, data_bits, stop_bits, parity, timeout
+        )?;
+        Ok(Self { inner: GenericModbusClient::new(transport) })
+    }
+    
+    /// Create from existing RtuTransport
+    pub fn from_transport(transport: RtuTransport) -> Self {
+        Self { inner: GenericModbusClient::new(transport) }
+    }
+    
+    /// Get the transport reference
+    pub fn transport(&self) -> &RtuTransport {
+        self.inner.transport()
+    }
+    
+    /// Execute a raw request
+    pub async fn execute_request(&mut self, request: ModbusRequest) -> ModbusResult<ModbusResponse> {
+        self.inner.execute_request(request).await
     }
 }
 
 #[async_trait]
 impl ModbusClient for ModbusRtuClient {
-    async fn read_coils(&mut self, _slave_id: SlaveId, _address: u16, _quantity: u16) -> ModbusResult<Vec<bool>> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_coils(slave_id, address, quantity).await
     }
     
-    async fn read_discrete_inputs(&mut self, _slave_id: SlaveId, _address: u16, _quantity: u16) -> ModbusResult<Vec<bool>> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_discrete_inputs(slave_id, address, quantity).await
     }
     
-    async fn read_holding_registers(&mut self, _slave_id: SlaveId, _address: u16, _quantity: u16) -> ModbusResult<Vec<u16>> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_holding_registers(slave_id, address, quantity).await
     }
     
-    async fn read_input_registers(&mut self, _slave_id: SlaveId, _address: u16, _quantity: u16) -> ModbusResult<Vec<u16>> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_input_registers(slave_id, address, quantity).await
     }
     
-    async fn write_single_coil(&mut self, _slave_id: SlaveId, _address: u16, _value: bool) -> ModbusResult<()> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        self.inner.write_single_coil(slave_id, address, value).await
     }
     
-    async fn write_single_register(&mut self, _slave_id: SlaveId, _address: u16, _value: u16) -> ModbusResult<()> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        self.inner.write_single_register(slave_id, address, value).await
     }
     
-    async fn write_multiple_coils(&mut self, _slave_id: SlaveId, _address: u16, _values: &[bool]) -> ModbusResult<()> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        self.inner.write_multiple_coils(slave_id, address, values).await
     }
     
-    async fn write_multiple_registers(&mut self, _slave_id: SlaveId, _address: u16, _values: &[u16]) -> ModbusResult<()> {
-        Err(ModbusError::protocol("RTU client not implemented yet"))
+    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        self.inner.write_multiple_registers(slave_id, address, values).await
     }
     
     fn is_connected(&self) -> bool {
-        self.transport.is_connected()
+        self.inner.is_connected()
     }
     
     async fn close(&mut self) -> ModbusResult<()> {
-        self.transport.close().await
+        self.inner.close().await
     }
     
     fn get_stats(&self) -> TransportStats {
-        self.transport.get_stats()
+        self.inner.get_stats()
     }
 }
 
@@ -381,7 +496,6 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ModbusFunction;
     
     #[test]
     fn test_register_conversion() {
@@ -414,5 +528,77 @@ mod tests {
         let result = ModbusTcpClient::new("127.0.0.1:9999").await;
         // This might fail due to connection refused, which is expected
         println!("TCP client creation result: {:?}", result.is_ok());
+    }
+    
+    #[test]
+    fn test_rtu_client_creation() {
+        // Test RTU client creation (will fail if no serial port available)
+        let result = ModbusRtuClient::new("/dev/ttyUSB0", 9600);
+        println!("RTU client creation result: {:?}", result.is_ok());
+        
+        // Test with custom configuration
+        let result = ModbusRtuClient::with_config(
+            "/dev/ttyUSB0",
+            9600,
+            tokio_serial::DataBits::Eight,
+            tokio_serial::StopBits::One,
+            tokio_serial::Parity::None,
+            Duration::from_secs(1),
+        );
+        println!("RTU client with config creation result: {:?}", result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_rtu_client_operations() {
+        // This test will only pass if a serial port is available
+        // In a real environment, you would have a Modbus RTU device connected
+        
+        // Try to create RTU client - this might fail if no port is available
+        let client_result = ModbusRtuClient::new("/dev/ttyUSB0", 9600);
+        
+        if let Ok(mut client) = client_result {
+            // Test connection status
+            println!("RTU client connected: {}", client.is_connected());
+            
+            // Test reading coils (this will likely timeout without a real device)
+            let read_result = tokio::time::timeout(
+                Duration::from_millis(100),
+                client.read_coils(1, 0, 8)
+            ).await;
+            
+            match read_result {
+                Ok(Ok(coils)) => {
+                    println!("Successfully read {} coils", coils.len());
+                }
+                Ok(Err(e)) => {
+                    println!("Read operation failed (expected without device): {}", e);
+                }
+                Err(_) => {
+                    println!("Read operation timed out (expected without device)");
+                }
+            }
+            
+            // Close the client
+            let _ = client.close().await;
+        } else {
+            println!("RTU client creation failed (expected without serial port)");
+        }
+    }
+    
+    #[test]
+    fn test_rtu_client_configuration() {
+        // Test different configurations
+        let configs = vec![
+            ("/dev/ttyUSB0", 9600),
+            ("/dev/ttyUSB1", 19200),
+            ("/dev/ttyS0", 38400),
+            ("COM1", 115200),
+        ];
+        
+        for (port, baud) in configs {
+            let result = ModbusRtuClient::new(port, baud);
+            // We expect these to fail without actual hardware, but they should not panic
+            println!("RTU client creation for {} at {} baud: {}", port, baud, result.is_ok());
+        }
     }
 } 
