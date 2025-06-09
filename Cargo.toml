@@ -9,7 +9,7 @@ homepage = "https://github.com/voltage-llc/voltage_modbus"
 repository = "https://github.com/voltage-llc/voltage_modbus"
 documentation = "https://docs.rs/voltage_modbus"
 readme = "README.md"
-keywords = ["modbus", "industrial", "automation", "tcp", "rtu", "voltage", "iot"]
+keywords = ["modbus", "industrial", "tcp", "rtu"]
 categories = ["network-programming", "embedded", "hardware-support"]
 exclude = [
     ".github/*",
