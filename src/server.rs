@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,7 +83,7 @@ pub struct ModbusTcpServer {
     register_bank: Arc<ModbusRegisterBank>,
     stats: Arc<Mutex<ServerStats>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
-    is_running: Arc<Mutex<bool>>,
+    is_running: Arc<AtomicBool>,
     start_time: Option<std::time::Instant>,
 }
 
@@ -110,7 +111,7 @@ impl ModbusTcpServer {
             register_bank,
             stats: Arc::new(Mutex::new(ServerStats::default())),
             shutdown_tx: None,
-            is_running: Arc::new(Mutex::new(false)),
+            is_running: Arc::new(AtomicBool::new(false)),
             start_time: None,
         })
     }
@@ -509,8 +510,7 @@ impl ModbusTcpServer {
 #[async_trait]
 impl ModbusServer for ModbusTcpServer {
     async fn start(&mut self) -> ModbusResult<()> {
-        let mut is_running = self.is_running.lock().await;
-        if *is_running {
+        if self.is_running.load(Ordering::Relaxed) {
             return Err(ModbusError::protocol("Server is already running"));
         }
         
@@ -523,9 +523,6 @@ impl ModbusServer for ModbusTcpServer {
         self.shutdown_tx = Some(shutdown_tx.clone());
         self.start_time = Some(std::time::Instant::now());
         
-        *is_running = true;
-        drop(is_running);
-        
         info!("✅ Modbus TCP server started successfully");
         info!("📊 Server configuration:");
         info!("   - Bind address: {}", self.config.bind_address);
@@ -537,6 +534,9 @@ impl ModbusServer for ModbusTcpServer {
         let request_timeout = self.config.request_timeout;
         let is_running_flag = self.is_running.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        
+        // Set is_running to true only after successfully binding and before starting the listen loop
+        self.is_running.store(true, Ordering::Relaxed);
         
         tokio::spawn(async move {
             loop {
@@ -566,8 +566,7 @@ impl ModbusServer for ModbusTcpServer {
                 }
             }
             
-            let mut is_running = is_running_flag.lock().await;
-            *is_running = false;
+            is_running_flag.store(false, Ordering::Relaxed);
         });
         
         Ok(())
@@ -578,17 +577,14 @@ impl ModbusServer for ModbusTcpServer {
             let _ = shutdown_tx.send(());
         }
         
-        let mut is_running = self.is_running.lock().await;
-        *is_running = false;
+        self.is_running.store(false, Ordering::Relaxed);
         
         info!("⏹️  Modbus TCP server stopped");
         Ok(())
     }
     
     fn is_running(&self) -> bool {
-        // Note: This is a synchronous method, so we can't use async lock
-        // In a real implementation, you might want to use a different approach
-        false // Placeholder
+        self.is_running.load(Ordering::Relaxed)
     }
     
     fn get_stats(&self) -> ServerStats {
@@ -643,7 +639,7 @@ pub struct ModbusRtuServer {
     register_bank: Arc<ModbusRegisterBank>,
     stats: Arc<Mutex<ServerStats>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
-    is_running: Arc<Mutex<bool>>,
+    is_running: Arc<AtomicBool>,
     start_time: Option<std::time::Instant>,
 }
 
@@ -669,7 +665,7 @@ impl ModbusRtuServer {
             register_bank,
             stats: Arc::new(Mutex::new(ServerStats::default())),
             shutdown_tx: None,
-            is_running: Arc::new(Mutex::new(false)),
+            is_running: Arc::new(AtomicBool::new(false)),
             start_time: None,
         })
     }
@@ -914,8 +910,7 @@ impl ModbusRtuServer {
 #[async_trait]
 impl ModbusServer for ModbusRtuServer {
     async fn start(&mut self) -> ModbusResult<()> {
-        let mut is_running = self.is_running.lock().await;
-        if *is_running {
+        if self.is_running.load(Ordering::Relaxed) {
             return Err(ModbusError::protocol("RTU Server is already running"));
         }
         
@@ -933,8 +928,7 @@ impl ModbusServer for ModbusRtuServer {
         self.shutdown_tx = Some(shutdown_tx.clone());
         self.start_time = Some(std::time::Instant::now());
         
-        *is_running = true;
-        drop(is_running);
+        self.is_running.store(true, Ordering::Relaxed);
         
         info!("✅ Modbus RTU server started successfully");
         info!("📊 Server configuration:");
@@ -954,8 +948,7 @@ impl ModbusServer for ModbusRtuServer {
         tokio::spawn(async move {
             Self::handle_rtu_communication(port, register_bank, stats, shutdown_rx, frame_gap).await;
             
-            let mut is_running = is_running_flag.lock().await;
-            *is_running = false;
+            is_running_flag.store(false, Ordering::Relaxed);
         });
         
         Ok(())
@@ -966,17 +959,14 @@ impl ModbusServer for ModbusRtuServer {
             let _ = shutdown_tx.send(());
         }
         
-        let mut is_running = self.is_running.lock().await;
-        *is_running = false;
+        self.is_running.store(false, Ordering::Relaxed);
         
         info!("⏹️  Modbus RTU server stopped");
         Ok(())
     }
     
     fn is_running(&self) -> bool {
-        // Note: This is a synchronous method, so we can't use async lock
-        // In a real implementation, you might want to use a different approach
-        false // Placeholder
+        self.is_running.load(Ordering::Relaxed)
     }
     
     fn get_stats(&self) -> ServerStats {

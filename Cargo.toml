@@ -1,6 +1,7 @@
+[workspace]
 [package]
 name = "voltage_modbus"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Evan Liu <evan.liu@voltageenergy.com>"]
 description = "High-performance Modbus TCP/RTU/ASCII implementation for industrial automation and IoT applications"
