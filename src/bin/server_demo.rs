@@ -33,11 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create custom register storage
     let register_bank = Arc::new(ModbusRegisterBank::new());
     
-    // Initialize test data
+    // Initialize with some test data
     info!("🔧 Initializing test data...");
-    for i in 0..50 {
-        register_bank.write_single_register(i, 0x1000 + i).unwrap();
-        register_bank.write_single_coil(i, (i % 3) == 0).unwrap();
+    for i in 0..100 {
+        register_bank.write_06(i, 0x1000 + i).unwrap();
+        register_bank.write_05(i, (i % 3) == 0).unwrap();
         register_bank.set_input_register(i, 0x2000 + i).unwrap();
         register_bank.set_discrete_input(i, (i % 2) == 0).unwrap();
     }

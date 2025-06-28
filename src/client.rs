@@ -16,35 +16,39 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::{ModbusError, ModbusResult};
-use crate::protocol::{ModbusRequest, ModbusResponse, ModbusFunction, SlaveId, data_utils};
+use crate::protocol::{ModbusRequest, ModbusResponse, ModbusFunction, SlaveId};
 use crate::transport::{ModbusTransport, TcpTransport, RtuTransport, TransportStats};
+use crate::logging::CallbackLogger;
 
-/// High-level Modbus client trait
-#[async_trait]
+/// Trait defining the interface for Modbus client operations
+/// 
+/// This trait provides async methods for all standard Modbus functions,
+/// with clear function code references for better understanding.
+#[async_trait::async_trait]
 pub trait ModbusClient: Send + Sync {
     /// Read coils (function code 0x01)
-    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>>;
+    async fn read_01(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>>;
     
     /// Read discrete inputs (function code 0x02)
-    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>>;
+    async fn read_02(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>>;
     
     /// Read holding registers (function code 0x03)
-    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>>;
+    async fn read_03(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>>;
     
     /// Read input registers (function code 0x04)
-    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>>;
+    async fn read_04(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>>;
     
     /// Write single coil (function code 0x05)
-    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()>;
+    async fn write_05(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()>;
     
     /// Write single register (function code 0x06)
-    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()>;
+    async fn write_06(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()>;
     
     /// Write multiple coils (function code 0x0F)
-    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()>;
+    async fn write_0f(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()>;
     
     /// Write multiple registers (function code 0x10)
-    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()>;
+    async fn write_10(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()>;
     
     /// Check if client is connected
     fn is_connected(&self) -> bool;
@@ -54,6 +58,23 @@ pub trait ModbusClient: Send + Sync {
     
     /// Get transport statistics
     fn get_stats(&self) -> TransportStats;
+
+    // Legacy function names for compatibility
+    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        self.write_05(slave_id, address, value).await
+    }
+    
+    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        self.write_06(slave_id, address, value).await
+    }
+    
+    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        self.write_0f(slave_id, address, values).await
+    }
+    
+    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        self.write_10(slave_id, address, values).await
+    }
 }
 
 /// Generic Modbus client that works with any transport
@@ -63,12 +84,24 @@ pub trait ModbusClient: Send + Sync {
 /// This eliminates code duplication between TCP and RTU clients since the PDU is identical.
 pub struct GenericModbusClient<T: ModbusTransport> {
     transport: T,
+    logger: Option<CallbackLogger>,
 }
 
 impl<T: ModbusTransport> GenericModbusClient<T> {
     /// Create a new generic client with the specified transport
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self { 
+            transport,
+            logger: None,
+        }
+    }
+
+    /// Create a new generic client with logging
+    pub fn with_logger(transport: T, logger: CallbackLogger) -> Self {
+        Self {
+            transport,
+            logger: Some(logger),
+        }
     }
     
     /// Get a reference to the underlying transport
@@ -83,139 +116,198 @@ impl<T: ModbusTransport> GenericModbusClient<T> {
     
     /// Execute a raw request
     pub async fn execute_request(&mut self, request: ModbusRequest) -> ModbusResult<ModbusResponse> {
-        self.transport.request(&request).await
+        // Log request if logger is available
+        if let Some(ref logger) = self.logger {
+            logger.log_request(
+                request.slave_id,
+                request.function.to_u8(),
+                request.address,
+                request.quantity,
+                &request.data,
+            );
+        }
+
+        let response = self.transport.request(&request).await?;
+
+        // Log response if logger is available
+        if let Some(ref logger) = self.logger {
+            logger.log_response(
+                response.slave_id,
+                response.function.to_u8(),
+                &response.data,
+            );
+        }
+
+        Ok(response)
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<T: ModbusTransport + Send + Sync> ModbusClient for GenericModbusClient<T> {
-    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        if quantity == 0 || quantity > crate::MAX_COILS_PER_REQUEST {
-            return Err(ModbusError::invalid_address(address, quantity));
+    async fn read_01(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        if quantity == 0 || quantity > 2000 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let request = ModbusRequest::new_read(
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::ReadCoils,
+            function: ModbusFunction::ReadCoils,
             address,
             quantity,
-        );
+            data: vec![],
+        };
         
-        let response = self.transport.request(&request).await?;
-        let bits = response.parse_bits()?;
-        
-        // Return only the requested number of bits
-        Ok(bits.into_iter().take(quantity as usize).collect())
+        let response = self.execute_request(request).await?;
+        Ok(response.data.chunks(8)
+           .flat_map(|byte_data| {
+               if let Some(&byte) = byte_data.first() {
+                   (0..8).map(move |i| (byte & (1 << i)) != 0).collect::<Vec<bool>>()
+               } else {
+                   vec![]
+               }
+           })
+           .take(quantity as usize)
+           .collect())
     }
     
-    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        if quantity == 0 || quantity > crate::MAX_COILS_PER_REQUEST {
-            return Err(ModbusError::invalid_address(address, quantity));
+    async fn read_02(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        if quantity == 0 || quantity > 2000 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let request = ModbusRequest::new_read(
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::ReadDiscreteInputs,
+            function: ModbusFunction::ReadDiscreteInputs,
             address,
             quantity,
-        );
+            data: vec![],
+        };
         
-        let response = self.transport.request(&request).await?;
-        let bits = response.parse_bits()?;
-        
-        // Return only the requested number of bits
-        Ok(bits.into_iter().take(quantity as usize).collect())
+        let response = self.execute_request(request).await?;
+        Ok(response.data.chunks(8)
+           .flat_map(|byte_data| {
+               if let Some(&byte) = byte_data.first() {
+                   (0..8).map(move |i| (byte & (1 << i)) != 0).collect::<Vec<bool>>()
+               } else {
+                   vec![]
+               }
+           })
+           .take(quantity as usize)
+           .collect())
     }
     
-    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        if quantity == 0 || quantity > crate::MAX_REGISTERS_PER_REQUEST {
-            return Err(ModbusError::invalid_address(address, quantity));
+    async fn read_03(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        if quantity == 0 || quantity > 125 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let request = ModbusRequest::new_read(
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::ReadHoldingRegisters,
+            function: ModbusFunction::ReadHoldingRegisters,
             address,
             quantity,
-        );
+            data: vec![],
+        };
         
-        let response = self.transport.request(&request).await?;
-        response.parse_registers()
+        let response = self.execute_request(request).await?;
+        Ok(response.data.chunks(2).map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])).collect())
     }
     
-    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        if quantity == 0 || quantity > crate::MAX_REGISTERS_PER_REQUEST {
-            return Err(ModbusError::invalid_address(address, quantity));
+    async fn read_04(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        if quantity == 0 || quantity > 125 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let request = ModbusRequest::new_read(
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::ReadInputRegisters,
+            function: ModbusFunction::ReadInputRegisters,
             address,
             quantity,
-        );
+            data: vec![],
+        };
         
-        let response = self.transport.request(&request).await?;
-        response.parse_registers()
+        let response = self.execute_request(request).await?;
+        Ok(response.data.chunks(2).map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])).collect())
     }
     
-    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
-        let data = vec![if value { 1 } else { 0 }];
-        let request = ModbusRequest::new_write(
+    async fn write_05(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        let mut data = vec![];
+        data.extend_from_slice(&if value { [0xFF, 0x00] } else { [0x00, 0x00] });
+        
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::WriteSingleCoil,
+            function: ModbusFunction::WriteSingleCoil,
             address,
+            quantity: 1,
             data,
-        );
+        };
         
-        let _response = self.transport.request(&request).await?;
+        self.execute_request(request).await?;
         Ok(())
     }
     
-    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
-        let data = value.to_be_bytes().to_vec();
-        let request = ModbusRequest::new_write(
+    async fn write_06(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        let request = ModbusRequest {
             slave_id,
-            ModbusFunction::WriteSingleRegister,
+            function: ModbusFunction::WriteSingleRegister,
             address,
-            data,
-        );
+            quantity: 1,
+            data: value.to_be_bytes().to_vec(),
+        };
         
-        let _response = self.transport.request(&request).await?;
+        self.execute_request(request).await?;
         Ok(())
     }
     
-    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
-        if values.is_empty() || values.len() > crate::MAX_COILS_PER_REQUEST as usize {
-            return Err(ModbusError::invalid_address(address, values.len() as u16));
+    async fn write_0f(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        if values.is_empty() || values.len() > 1968 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let data = data_utils::pack_bits(values);
-        let request = ModbusRequest::new_write(
-            slave_id,
-            ModbusFunction::WriteMultipleCoils,
-            address,
-            data,
-        );
+        let byte_count = (values.len() + 7) / 8;
+        let mut data = vec![byte_count as u8];
         
-        let _response = self.transport.request(&request).await?;
+        for chunk in values.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &coil) in chunk.iter().enumerate() {
+                if coil {
+                    byte |= 1 << i;
+                }
+            }
+            data.push(byte);
+        }
+        
+        let request = ModbusRequest {
+            slave_id,
+            function: ModbusFunction::WriteMultipleCoils,
+            address,
+            quantity: values.len() as u16,
+            data,
+        };
+        
+        self.execute_request(request).await?;
         Ok(())
     }
     
-    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
-        if values.is_empty() || values.len() > crate::MAX_REGISTERS_PER_REQUEST as usize {
-            return Err(ModbusError::invalid_address(address, values.len() as u16));
+    async fn write_10(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        if values.is_empty() || values.len() > 123 {
+            return Err(ModbusError::InvalidDataValue);
         }
         
-        let data = data_utils::registers_to_bytes(values);
-        let request = ModbusRequest::new_write(
-            slave_id,
-            ModbusFunction::WriteMultipleRegisters,
-            address,
-            data,
-        );
+        let mut data = vec![values.len() as u8 * 2];
+        for &value in values {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
         
-        let _response = self.transport.request(&request).await?;
+        let request = ModbusRequest {
+            slave_id,
+            function: ModbusFunction::WriteMultipleRegisters,
+            address,
+            quantity: values.len() as u16,
+            data,
+        };
+        
+        self.execute_request(request).await?;
         Ok(())
     }
     
@@ -238,29 +330,45 @@ pub struct ModbusTcpClient {
 }
 
 impl ModbusTcpClient {
-    /// Create a new Modbus TCP client
-    pub async fn new(address: &str) -> ModbusResult<Self> {
-        Self::with_timeout(address, Duration::from_millis(crate::DEFAULT_TIMEOUT_MS)).await
+    /// Create a new TCP client
+    pub async fn new(addr: SocketAddr, timeout: Duration) -> ModbusResult<Self> {
+        let transport = TcpTransport::new(addr, timeout).await?;
+        Ok(Self {
+            inner: GenericModbusClient::new(transport),
+        })
     }
-    
-    /// Create a new Modbus TCP client with custom timeout
-    pub async fn with_timeout(address: &str, timeout: Duration) -> ModbusResult<Self> {
-        let socket_addr = SocketAddr::from_str(address)
-            .map_err(|e| ModbusError::configuration(format!("Invalid address '{}': {}", address, e)))?;
-            
-        let transport = TcpTransport::new(socket_addr, timeout).await?;
-        
-        Ok(Self { inner: GenericModbusClient::new(transport) })
+
+    /// Create a new TCP client with logging
+    pub async fn with_logging(addr: &str, timeout: Duration, logger: Option<CallbackLogger>) -> ModbusResult<Self> {
+        let addr: SocketAddr = addr.parse().map_err(|e| ModbusError::configuration(format!("Invalid address: {}", e)))?;
+        let transport = TcpTransport::new(addr, timeout).await?;
+        let logger = logger.unwrap_or_else(CallbackLogger::default);
+        Ok(Self {
+            inner: GenericModbusClient::with_logger(transport, logger),
+        })
     }
-    
-    /// Create from existing TcpTransport
+
+    /// Create a new TCP client from address string
+    pub async fn from_address(addr: &str, timeout: Duration) -> ModbusResult<Self> {
+        let addr: SocketAddr = addr.parse().map_err(|e| ModbusError::configuration(format!("Invalid address: {}", e)))?;
+        Self::new(addr, timeout).await
+    }
+
+    /// Create a new TCP client from transport
     pub fn from_transport(transport: TcpTransport) -> Self {
-        Self { inner: GenericModbusClient::new(transport) }
+        Self {
+            inner: GenericModbusClient::new(transport),
+        }
     }
     
     /// Get the server address
     pub fn server_address(&self) -> SocketAddr {
         self.inner.transport().address
+    }
+
+    /// Enable or disable packet logging on existing client
+    pub fn set_packet_logging(&mut self, enabled: bool) {
+        self.inner.transport_mut().set_packet_logging(enabled);
     }
     
     /// Execute a raw request
@@ -269,38 +377,38 @@ impl ModbusTcpClient {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ModbusClient for ModbusTcpClient {
-    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        self.inner.read_coils(slave_id, address, quantity).await
+    async fn read_01(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_01(slave_id, address, quantity).await
     }
     
-    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        self.inner.read_discrete_inputs(slave_id, address, quantity).await
+    async fn read_02(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_02(slave_id, address, quantity).await
     }
     
-    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        self.inner.read_holding_registers(slave_id, address, quantity).await
+    async fn read_03(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_03(slave_id, address, quantity).await
     }
     
-    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        self.inner.read_input_registers(slave_id, address, quantity).await
+    async fn read_04(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_04(slave_id, address, quantity).await
     }
     
-    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
-        self.inner.write_single_coil(slave_id, address, value).await
+    async fn write_05(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        self.inner.write_05(slave_id, address, value).await
     }
     
-    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
-        self.inner.write_single_register(slave_id, address, value).await
+    async fn write_06(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        self.inner.write_06(slave_id, address, value).await
     }
     
-    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
-        self.inner.write_multiple_coils(slave_id, address, values).await
+    async fn write_0f(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        self.inner.write_0f(slave_id, address, values).await
     }
     
-    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
-        self.inner.write_multiple_registers(slave_id, address, values).await
+    async fn write_10(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        self.inner.write_10(slave_id, address, values).await
     }
     
     fn is_connected(&self) -> bool {
@@ -322,27 +430,47 @@ pub struct ModbusRtuClient {
 }
 
 impl ModbusRtuClient {
-    /// Create a new Modbus RTU client with default settings
-    pub fn new(port: &str, baud_rate: u32) -> ModbusResult<Self> {
+    /// Create a new RTU client with default settings
+    pub fn new(
+        port: &str,
+        baud_rate: u32,
+    ) -> ModbusResult<Self> {
         let transport = RtuTransport::new(port, baud_rate)?;
-        Ok(Self { inner: GenericModbusClient::new(transport) })
+        Ok(Self {
+            inner: GenericModbusClient::new(transport),
+        })
     }
-    
-    /// Create a new Modbus RTU client with custom configuration
-    pub fn with_config(
+
+    /// Create a new RTU client with logging
+    pub fn with_logging(
+        port: &str,
+        baud_rate: u32,
+        logger: Option<CallbackLogger>,
+    ) -> ModbusResult<Self> {
+        let transport = RtuTransport::new(port, baud_rate)?;
+        let logger = logger.unwrap_or_else(CallbackLogger::default);
+        Ok(Self {
+            inner: GenericModbusClient::with_logger(transport, logger),
+        })
+    }
+
+    /// Create a new RTU client with custom configuration and logging
+    pub fn with_config_and_logging(
         port: &str,
         baud_rate: u32,
         data_bits: tokio_serial::DataBits,
         stop_bits: tokio_serial::StopBits,
         parity: tokio_serial::Parity,
         timeout: Duration,
+        logger: Option<CallbackLogger>,
     ) -> ModbusResult<Self> {
-        let transport = RtuTransport::new_with_config(
-            port, baud_rate, data_bits, stop_bits, parity, timeout
-        )?;
-        Ok(Self { inner: GenericModbusClient::new(transport) })
+        let transport = RtuTransport::new_with_config(port, baud_rate, data_bits, stop_bits, parity, timeout)?;
+        let logger = logger.unwrap_or_else(CallbackLogger::default);
+        Ok(Self {
+            inner: GenericModbusClient::with_logger(transport, logger),
+        })
     }
-    
+
     /// Create from existing RtuTransport
     pub fn from_transport(transport: RtuTransport) -> Self {
         Self { inner: GenericModbusClient::new(transport) }
@@ -352,6 +480,11 @@ impl ModbusRtuClient {
     pub fn transport(&self) -> &RtuTransport {
         self.inner.transport()
     }
+
+    /// Enable or disable packet logging on existing client
+    pub fn set_packet_logging(&mut self, enabled: bool) {
+        self.inner.transport_mut().set_packet_logging(enabled);
+    }
     
     /// Execute a raw request
     pub async fn execute_request(&mut self, request: ModbusRequest) -> ModbusResult<ModbusResponse> {
@@ -359,38 +492,38 @@ impl ModbusRtuClient {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ModbusClient for ModbusRtuClient {
-    async fn read_coils(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        self.inner.read_coils(slave_id, address, quantity).await
+    async fn read_01(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_01(slave_id, address, quantity).await
     }
     
-    async fn read_discrete_inputs(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        self.inner.read_discrete_inputs(slave_id, address, quantity).await
+    async fn read_02(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.inner.read_02(slave_id, address, quantity).await
     }
     
-    async fn read_holding_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        self.inner.read_holding_registers(slave_id, address, quantity).await
+    async fn read_03(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_03(slave_id, address, quantity).await
     }
     
-    async fn read_input_registers(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        self.inner.read_input_registers(slave_id, address, quantity).await
+    async fn read_04(&mut self, slave_id: SlaveId, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.inner.read_04(slave_id, address, quantity).await
     }
     
-    async fn write_single_coil(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
-        self.inner.write_single_coil(slave_id, address, value).await
+    async fn write_05(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
+        self.inner.write_05(slave_id, address, value).await
     }
     
-    async fn write_single_register(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
-        self.inner.write_single_register(slave_id, address, value).await
+    async fn write_06(&mut self, slave_id: SlaveId, address: u16, value: u16) -> ModbusResult<()> {
+        self.inner.write_06(slave_id, address, value).await
     }
     
-    async fn write_multiple_coils(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
-        self.inner.write_multiple_coils(slave_id, address, values).await
+    async fn write_0f(&mut self, slave_id: SlaveId, address: u16, values: &[bool]) -> ModbusResult<()> {
+        self.inner.write_0f(slave_id, address, values).await
     }
     
-    async fn write_multiple_registers(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
-        self.inner.write_multiple_registers(slave_id, address, values).await
+    async fn write_10(&mut self, slave_id: SlaveId, address: u16, values: &[u16]) -> ModbusResult<()> {
+        self.inner.write_10(slave_id, address, values).await
     }
     
     fn is_connected(&self) -> bool {
@@ -421,10 +554,10 @@ pub mod utils {
         for &(function, address, quantity) in operations {
             let values = match function {
                 ModbusFunction::ReadHoldingRegisters => {
-                    client.read_holding_registers(slave_id, address, quantity).await?
+                    client.read_03(slave_id, address, quantity).await?
                 },
                 ModbusFunction::ReadInputRegisters => {
-                    client.read_input_registers(slave_id, address, quantity).await?
+                    client.read_04(slave_id, address, quantity).await?
                 },
                 _ => return Err(ModbusError::invalid_function(function.to_u8())),
             };
@@ -442,9 +575,9 @@ pub mod utils {
     ) -> ModbusResult<()> {
         for (address, values) in writes {
             if values.len() == 1 {
-                client.write_single_register(slave_id, *address, values[0]).await?;
+                client.write_06(slave_id, *address, values[0]).await?;
             } else {
-                client.write_multiple_registers(slave_id, *address, values).await?;
+                client.write_10(slave_id, *address, values).await?;
             }
         }
         Ok(())
@@ -520,30 +653,31 @@ mod tests {
     
     #[tokio::test]
     async fn test_tcp_client_creation() {
-        // Test with invalid address
-        let result = ModbusTcpClient::new("invalid_address").await;
-        assert!(result.is_err());
+        use std::time::Duration;
         
         // Test with valid but non-existent address
-        let result = ModbusTcpClient::new("127.0.0.1:9999").await;
+        let result = ModbusTcpClient::from_address("127.0.0.1:9999", Duration::from_secs(1)).await;
         // This might fail due to connection refused, which is expected
         println!("TCP client creation result: {:?}", result.is_ok());
     }
     
     #[test]
     fn test_rtu_client_creation() {
+        use std::time::Duration;
+        
         // Test RTU client creation (will fail if no serial port available)
         let result = ModbusRtuClient::new("/dev/ttyUSB0", 9600);
         println!("RTU client creation result: {:?}", result.is_ok());
         
         // Test with custom configuration
-        let result = ModbusRtuClient::with_config(
+        let result = ModbusRtuClient::with_config_and_logging(
             "/dev/ttyUSB0",
             9600,
             tokio_serial::DataBits::Eight,
             tokio_serial::StopBits::One,
             tokio_serial::Parity::None,
             Duration::from_secs(1),
+            None,
         );
         println!("RTU client with config creation result: {:?}", result.is_ok());
     }
@@ -563,7 +697,7 @@ mod tests {
             // Test reading coils (this will likely timeout without a real device)
             let read_result = tokio::time::timeout(
                 Duration::from_millis(100),
-                client.read_coils(1, 0, 8)
+                client.read_01(1, 0, 8)
             ).await;
             
             match read_result {

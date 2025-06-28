@@ -41,14 +41,14 @@
 //! #[tokio::main]
 //! async fn main() -> ModbusResult<()> {
 //!     // Connect to Modbus TCP server
-//!     let mut client = ModbusTcpClient::with_timeout("127.0.0.1:502", Duration::from_secs(5)).await?;
+//!     let mut client = ModbusTcpClient::from_address("127.0.0.1:502", Duration::from_secs(5)).await?;
 //!     
 //!     // Read holding registers
-//!     let values = client.read_holding_registers(1, 0, 10).await?;
+//!     let values = client.read_03(1, 0, 10).await?;
 //!     println!("Read registers: {:?}", values);
 //!     
 //!     // Write single register
-//!     client.write_single_register(1, 100, 0x1234).await?;
+//!     client.write_06(1, 100, 0x1234).await?;
 //!     
 //!     client.close().await?;
 //!     Ok(())
@@ -138,14 +138,20 @@ pub mod register_bank;
 /// Author: Evan Liu <evan.liu@voltageenergy.com>
 pub mod utils;
 
+/// Logging system for the library
+/// 
+/// Author: Evan Liu <evan.liu@voltageenergy.com>
+pub mod logging;
+
 // Re-export main types for convenience
 pub use error::{ModbusError, ModbusResult};
 pub use protocol::{ModbusRequest, ModbusResponse, ModbusFunction};
 pub use transport::{ModbusTransport, TcpTransport, RtuTransport, AsciiTransport, TransportStats};
-pub use client::{ModbusClient, ModbusTcpClient};
+pub use client::{ModbusClient, ModbusTcpClient, ModbusRtuClient};
 pub use server::{ModbusServer, ModbusTcpServer, ModbusTcpServerConfig, ServerStats};
 pub use register_bank::{ModbusRegisterBank, RegisterBankStats};
 pub use utils::{PerformanceMetrics, OperationTimer};
+pub use logging::{LogLevel, LogCallback, CallbackLogger, LoggingMode};
 
 /// Default timeout for operations (5 seconds)
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;

@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: std::net::SocketAddr = server_address.parse()
         .map_err(|e| format!("Invalid server address: {}", e))?;
     
-    let mut client = match ModbusTcpClient::with_timeout(&server_address, timeout).await {
+    let mut client = match ModbusTcpClient::from_address(&server_address, timeout).await {
         Ok(client) => {
             println!("✅ Connected successfully!");
             client
@@ -43,11 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📖 Testing read operations...");
     
     // Test reading holding registers
-    match client.read_holding_registers(slave_id, 100, 5).await {
+    match client.read_03(slave_id, 100, 5).await {
         Ok(values) => {
-            println!("✅ Read holding registers 100-104: {:?}", values);
+            println!("📈 Read holding registers 100-104: {:?}", values);
             for (i, value) in values.iter().enumerate() {
-                println!("   Register {}: 0x{:04X} ({})", 100 + i, value, value);
+                println!("  Register {}: {} (0x{:04X})", 100 + i, value, value);
             }
         },
         Err(e) => println!("❌ Failed to read holding registers: {}", e),
@@ -56,9 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_millis(100)).await;
     
     // Test reading input registers
-    match client.read_input_registers(slave_id, 200, 3).await {
+    match client.read_04(slave_id, 200, 3).await {
         Ok(values) => {
-            println!("✅ Read input registers 200-202: {:?}", values);
+            println!("📊 Read input registers 200-202: {:?}", values);
         },
         Err(e) => println!("❌ Failed to read input registers: {}", e),
     }
@@ -66,11 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_millis(100)).await;
     
     // Test reading coils
-    match client.read_coils(slave_id, 0, 8).await {
-        Ok(values) => {
-            println!("✅ Read coils 0-7: {:?}", values);
-            for (i, &coil) in values.iter().enumerate() {
-                println!("   Coil {}: {}", i, if coil { "ON" } else { "OFF" });
+    match client.read_01(slave_id, 0, 8).await {
+        Ok(coils) => {
+            println!("💡 Read coils 0-7: {:?}", coils);
+            for (i, &coil) in coils.iter().enumerate() {
+                println!("  Coil {}: {}", i, if coil { "ON" } else { "OFF" });
             }
         },
         Err(e) => println!("❌ Failed to read coils: {}", e),
@@ -79,108 +79,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_millis(100)).await;
     
     // Test reading discrete inputs
-    match client.read_discrete_inputs(slave_id, 100, 4).await {
-        Ok(values) => {
-            println!("✅ Read discrete inputs 100-103: {:?}", values);
+    match client.read_02(slave_id, 100, 4).await {
+        Ok(inputs) => {
+            println!("🔌 Read discrete inputs 100-103: {:?}", inputs);
         },
         Err(e) => println!("❌ Failed to read discrete inputs: {}", e),
     }
     
     println!("\n✏️  Testing write operations...");
     
-    // Test writing single register
-    let test_value = 0x1234;
-    match client.write_single_register(slave_id, 300, test_value).await {
-        Ok(_) => {
-            println!("✅ Wrote single register 300 = 0x{:04X}", test_value);
-            
-            // Read it back to verify
-            sleep(Duration::from_millis(50)).await;
-            match client.read_holding_registers(slave_id, 300, 1).await {
-                Ok(values) if !values.is_empty() => {
-                    if values[0] == test_value {
-                        println!("✅ Verified: register 300 = 0x{:04X}", values[0]);
-                    } else {
-                        println!("⚠️  Value mismatch: expected 0x{:04X}, got 0x{:04X}", test_value, values[0]);
-                    }
-                },
-                Ok(_) => println!("⚠️  Read back empty result"),
-                Err(e) => println!("❌ Failed to read back register: {}", e),
-            }
-        },
+    // Write single register using function code 0x06
+    match client.write_06(slave_id, 300, 0xABCD).await {
+        Ok(_) => println!("✅ Wrote single register 300 = 0xABCD"),
         Err(e) => println!("❌ Failed to write single register: {}", e),
     }
     
     sleep(Duration::from_millis(100)).await;
     
-    // Test writing multiple registers
-    let test_values = vec![0x1111, 0x2222, 0x3333];
-    match client.write_multiple_registers(slave_id, 400, &test_values).await {
-        Ok(_) => {
-            println!("✅ Wrote multiple registers 400-402: {:?}", test_values);
-            
-            // Read them back to verify
-            sleep(Duration::from_millis(50)).await;
-            match client.read_holding_registers(slave_id, 400, test_values.len() as u16).await {
-                Ok(values) => {
-                    if values == test_values {
-                        println!("✅ Verified: registers 400-402 = {:?}", values);
-                    } else {
-                        println!("⚠️  Value mismatch: expected {:?}, got {:?}", test_values, values);
-                    }
-                },
-                Err(e) => println!("❌ Failed to read back registers: {}", e),
-            }
-        },
-        Err(e) => println!("❌ Failed to write multiple registers: {}", e),
-    }
-    
-    sleep(Duration::from_millis(100)).await;
-    
-    // Test writing single coil
-    match client.write_single_coil(slave_id, 10, true).await {
-        Ok(_) => {
-            println!("✅ Wrote single coil 10 = ON");
-            
-            // Read it back to verify
-            sleep(Duration::from_millis(50)).await;
-            match client.read_coils(slave_id, 10, 1).await {
-                Ok(values) if !values.is_empty() => {
-                    if values[0] {
-                        println!("✅ Verified: coil 10 = ON");
-                    } else {
-                        println!("⚠️  Value mismatch: expected ON, got OFF");
-                    }
-                },
-                Ok(_) => println!("⚠️  Read back empty result"),
-                Err(e) => println!("❌ Failed to read back coil: {}", e),
-            }
-        },
+    // Write single coil using function code 0x05
+    match client.write_05(slave_id, 100, true).await {
+        Ok(_) => println!("✅ Wrote single coil 100 = true"),
         Err(e) => println!("❌ Failed to write single coil: {}", e),
     }
     
     sleep(Duration::from_millis(100)).await;
     
-    // Test writing multiple coils
-    let test_coils = vec![true, false, true, false, true];
-    match client.write_multiple_coils(slave_id, 20, &test_coils).await {
-        Ok(_) => {
-            println!("✅ Wrote multiple coils 20-24: {:?}", test_coils);
-            
-            // Read them back to verify
-            sleep(Duration::from_millis(50)).await;
-            match client.read_coils(slave_id, 20, test_coils.len() as u16).await {
-                Ok(values) => {
-                    let trimmed_values: Vec<bool> = values.into_iter().take(test_coils.len()).collect();
-                    if trimmed_values == test_coils {
-                        println!("✅ Verified: coils 20-24 = {:?}", trimmed_values);
-                    } else {
-                        println!("⚠️  Value mismatch: expected {:?}, got {:?}", test_coils, trimmed_values);
-                    }
-                },
-                Err(e) => println!("❌ Failed to read back coils: {}", e),
-            }
-        },
+    // Write multiple registers using function code 0x10
+    match client.write_10(slave_id, 400, &[0x1111, 0x2222, 0x3333]).await {
+        Ok(_) => println!("✅ Wrote multiple registers 400-402"),
+        Err(e) => println!("❌ Failed to write multiple registers: {}", e),
+    }
+    
+    sleep(Duration::from_millis(100)).await;
+    
+    // Write multiple coils using function code 0x0F
+    match client.write_0f(slave_id, 200, &[true, false, true, false]).await {
+        Ok(_) => println!("✅ Wrote multiple coils 200-203"),
         Err(e) => println!("❌ Failed to write multiple coils: {}", e),
     }
     

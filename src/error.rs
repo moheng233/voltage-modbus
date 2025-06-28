@@ -65,7 +65,7 @@
 //! use voltage_modbus::{ModbusClient, ModbusError};
 //! 
 //! async fn read_with_error_handling(client: &mut impl ModbusClient) {
-//!     match client.read_holding_registers(1, 0, 10).await {
+//!     match client.read_03(1, 0, 10).await {
 //!         Ok(registers) => {
 //!             println!("Read {} registers", registers.len());
 //!         },
@@ -79,6 +79,19 @@
 //!         Err(error) => {
 //!             println!("Other error: {}", error);
 //!         }
+//!     }
+//! }
+//! 
+//! // Example showing function code naming
+//! async fn example_with_function_codes(client: &mut impl ModbusClient) {
+//!     // Read holding registers using function code naming
+//!     match client.read_03(1, 0, 10).await {
+//!         Ok(registers) => println!("Values: {:?}", registers),
+//!         Err(ModbusError::Timeout { operation, timeout_ms }) => {
+//!             println!("Request {} timed out after {}ms, retrying...", operation, timeout_ms);
+//!             // Implement retry logic
+//!         },
+//!         Err(e) => println!("Error: {}", e),
 //!     }
 //! }
 //! ```
@@ -142,13 +155,11 @@ pub type ModbusResult<T> = Result<T, ModbusError>;
 
 /// Comprehensive Modbus error types
 /// 
-/// This enumeration covers all possible error conditions that can occur during
-/// Modbus communication, from transport-level issues to protocol violations and
-/// data validation failures.
-/// 
+/// This enum covers all possible error conditions that can occur during Modbus
+/// communication, from low-level I/O errors to high-level protocol violations.
 /// Each variant provides detailed context about the specific failure, making it
 /// easier to diagnose issues and implement appropriate recovery strategies.
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum ModbusError {
     /// I/O related errors (network, serial)
     /// 
@@ -312,6 +323,32 @@ pub enum ModbusError {
     /// - Resource management failures
     #[error("Internal error: {message}")]
     Internal { message: String },
+
+    // Legacy aliases for compatibility
+    /// Legacy timeout error (use Timeout instead)
+    #[error("Timeout")]
+    #[deprecated(note = "Use Timeout with operation and timeout_ms fields")]
+    TimeoutLegacy,
+    
+    /// Legacy invalid frame error (use Frame instead)
+    #[error("Invalid frame")]
+    #[deprecated(note = "Use Frame with message field")]
+    InvalidFrame,
+    
+    /// Legacy invalid data value error (use InvalidData instead)
+    #[error("Invalid data value")]
+    #[deprecated(note = "Use InvalidData with message field")]
+    InvalidDataValue,
+    
+    /// Legacy illegal function error (use InvalidFunction instead)
+    #[error("Illegal function")]
+    #[deprecated(note = "Use InvalidFunction with code field")]
+    IllegalFunction,
+    
+    /// Legacy internal error (use Internal instead)
+    #[error("Internal error")]
+    #[deprecated(note = "Use Internal with message field")]
+    InternalError,
 }
 
 impl ModbusError {

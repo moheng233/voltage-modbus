@@ -129,6 +129,7 @@ use tokio::time::timeout;
 use crc::{Crc, CRC_16_MODBUS};
 // use bytes::{Buf, BufMut, BytesMut};
 use tokio_serial;
+use tracing::info;
 
 use crate::error::{ModbusError, ModbusResult};
 use crate::protocol::{ModbusRequest, ModbusResponse, ModbusFunction, SlaveId};
@@ -144,6 +145,23 @@ const MBAP_HEADER_SIZE: usize = 6;
 
 /// CRC calculator for RTU
 const CRC_MODBUS: Crc<u16> = Crc::<u16>::new(&CRC_16_MODBUS);
+
+/// Format raw bytes as hex string for packet logging
+fn format_hex_packet(data: &[u8]) -> String {
+    data.iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Log packet with direction and format
+fn log_packet(direction: &str, data: &[u8], protocol: &str, slave_id: Option<u8>) {
+    let hex_string = format_hex_packet(data);
+    match slave_id {
+        Some(id) => info!("[MODBUS-{}] {} slave:{} {}", protocol, direction, id, hex_string),
+        None => info!("[MODBUS-{}] {} {}", protocol, direction, hex_string),
+    }
+}
 
 /// Transport layer abstraction for Modbus communication protocols
 /// 
@@ -334,13 +352,15 @@ pub struct TransportStats {
     pub bytes_received: u64,
 }
 
-/// Modbus TCP transport implementation
+/// Modbus TCP transport implementation  
 pub struct TcpTransport {
     stream: Option<TcpStream>,
     pub address: SocketAddr,
     timeout: Duration,
     transaction_id: u16,
     stats: TransportStats,
+    /// Enable packet logging for debugging
+    packet_logging: bool,
 }
 
 impl TcpTransport {
@@ -355,7 +375,28 @@ impl TcpTransport {
             timeout,
             transaction_id: 1,
             stats: TransportStats::default(),
+            packet_logging: false,
         })
+    }
+
+    /// Create a new TCP transport with packet logging enabled
+    pub async fn with_packet_logging(address: SocketAddr, timeout: Duration, enable_logging: bool) -> ModbusResult<Self> {
+        let stream = TcpStream::connect(address).await
+            .map_err(|e| ModbusError::connection(format!("Failed to connect to {}: {}", address, e)))?;
+            
+        Ok(Self {
+            stream: Some(stream),
+            address,
+            timeout,
+            transaction_id: 1,
+            stats: TransportStats::default(),
+            packet_logging: enable_logging,
+        })
+    }
+
+    /// Enable or disable packet logging
+    pub fn set_packet_logging(&mut self, enabled: bool) {
+        self.packet_logging = enabled;
     }
     
     /// Reconnect to the server
@@ -499,6 +540,11 @@ impl ModbusTransport for TcpTransport {
         self.stats.requests_sent += 1;
         self.stats.bytes_sent += frame.len() as u64;
 
+        // Log outgoing packet
+        if self.packet_logging {
+            log_packet("send", &frame, "TCP", Some(request.slave_id));
+        }
+
         let stream = self.stream.as_mut().unwrap();
         
         let send_result = timeout(self.timeout, stream.write_all(&frame)).await;
@@ -549,6 +595,11 @@ impl ModbusTransport for TcpTransport {
         self.stats.responses_received += 1;
         self.stats.bytes_received += response_buf.len() as u64;
         
+        // Log incoming packet
+        if self.packet_logging {
+            log_packet("receive", &response_buf, "TCP", Some(request.slave_id));
+        }
+        
         // Decode response
         let response = self.decode_response(&response_buf)?;
         
@@ -597,6 +648,8 @@ pub struct RtuTransport {
     frame_gap: Duration,
     /// Transport statistics
     stats: TransportStats,
+    /// Enable packet logging for debugging
+    packet_logging: bool,
 }
 
 impl RtuTransport {
@@ -636,12 +689,48 @@ impl RtuTransport {
             timeout,
             frame_gap,
             stats: TransportStats::default(),
+            packet_logging: false,
         };
         
         // Try to connect immediately
         transport.connect()?;
         
         Ok(transport)
+    }
+
+    /// Create a new RTU transport with packet logging enabled
+    pub fn new_with_packet_logging(
+        port: &str,
+        baud_rate: u32,
+        data_bits: tokio_serial::DataBits,
+        stop_bits: tokio_serial::StopBits,
+        parity: tokio_serial::Parity,
+        timeout: Duration,
+        enable_logging: bool,
+    ) -> ModbusResult<Self> {
+        let char_time_us = (11_000_000 / baud_rate) as u64;
+        let frame_gap = Duration::from_micros(char_time_us * 35 / 10);
+        
+        let mut transport = Self {
+            port: None,
+            port_name: port.to_string(),
+            baud_rate,
+            data_bits,
+            stop_bits,
+            parity,
+            timeout,
+            frame_gap,
+            stats: TransportStats::default(),
+            packet_logging: enable_logging,
+        };
+        
+        transport.connect()?;
+        Ok(transport)
+    }
+
+    /// Enable or disable packet logging
+    pub fn set_packet_logging(&mut self, enabled: bool) {
+        self.packet_logging = enabled;
     }
     
     /// Connect to the serial port
@@ -840,6 +929,11 @@ impl ModbusTransport for RtuTransport {
         self.stats.requests_sent += 1;
         self.stats.bytes_sent += frame.len() as u64;
         
+        // Log outgoing packet
+        if self.packet_logging {
+            log_packet("send", &frame, "RTU", Some(request.slave_id));
+        }
+        
         // Send request
         let port = self.port.as_mut()
             .ok_or_else(|| ModbusError::connection("Serial port not connected"))?;
@@ -877,6 +971,11 @@ impl ModbusTransport for RtuTransport {
         
         self.stats.responses_received += 1;
         self.stats.bytes_received += response_frame.len() as u64;
+        
+        // Log incoming packet
+        if self.packet_logging {
+            log_packet("receive", &response_frame, "RTU", Some(request.slave_id));
+        }
         
         // Decode response
         let response = self.decode_response(&response_frame)?;

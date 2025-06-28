@@ -1,7 +1,6 @@
-[workspace]
 [package]
 name = "voltage_modbus"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Evan Liu <evan.liu@voltageenergy.com>"]
 description = "High-performance Modbus TCP/RTU/ASCII implementation for industrial automation and IoT applications"
@@ -31,7 +30,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
 tokio-serial = "5.4"
 
 # Error handling  
@@ -47,12 +46,12 @@ serde_yaml = "0.9"
 log = "0.4"
 env_logger = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = "0.3"
 
 # Utilities
 hex = "0.4"
 bytes = "1.4"
-byteorder = "1.5"
+byteorder = "1.4"
 crc = "3.0"
 rand = "0.8"
 
@@ -62,7 +61,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # Performance monitoring
-prometheus = { version = "0.13", features = ["process"] }
+prometheus = { version = "0.13", optional = true }
 
 # Testing utilities (dev dependencies)
 [dev-dependencies]

@@ -3,7 +3,9 @@
 /// This module provides thread-safe storage for Modbus data including coils,
 /// discrete inputs, holding registers, and input registers.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tracing::{debug, error, info, warn};
 use crate::error::{ModbusError, ModbusResult};
 
 /// Default register bank size
@@ -12,192 +14,150 @@ const DEFAULT_DISCRETE_INPUTS_SIZE: usize = 10000;
 const DEFAULT_HOLDING_REGISTERS_SIZE: usize = 10000;
 const DEFAULT_INPUT_REGISTERS_SIZE: usize = 10000;
 
-/// Thread-safe register bank for Modbus data
+/// Modbus register bank for storing coils, discrete inputs, holding registers, and input registers
+/// 
+/// This structure provides thread-safe access to Modbus data through Arc<RwLock<_>> wrappers.
+/// All register operations use 0-based addressing internally.
 #[derive(Debug, Clone)]
 pub struct ModbusRegisterBank {
-    coils: Arc<RwLock<Vec<bool>>>,
-    discrete_inputs: Arc<RwLock<Vec<bool>>>,
-    holding_registers: Arc<RwLock<Vec<u16>>>,
-    input_registers: Arc<RwLock<Vec<u16>>>,
+    /// Coils (read/write) - 1 bit each
+    coils: Arc<RwLock<HashMap<u16, bool>>>,
+    /// Discrete inputs (read-only) - 1 bit each
+    discrete_inputs: Arc<RwLock<HashMap<u16, bool>>>,
+    /// Holding registers (read/write) - 16 bits each
+    holding_registers: Arc<RwLock<HashMap<u16, u16>>>,
+    /// Input registers (read-only) - 16 bits each  
+    input_registers: Arc<RwLock<HashMap<u16, u16>>>,
 }
 
 impl ModbusRegisterBank {
-    /// Create a new register bank with default sizes
+    /// Create a new register bank with empty data
     pub fn new() -> Self {
-        Self::with_sizes(
-            DEFAULT_COILS_SIZE,
-            DEFAULT_DISCRETE_INPUTS_SIZE,
-            DEFAULT_HOLDING_REGISTERS_SIZE,
-            DEFAULT_INPUT_REGISTERS_SIZE,
-        )
-    }
-    
-    /// Create a new register bank with custom sizes
-    pub fn with_sizes(
-        coils_size: usize,
-        discrete_inputs_size: usize,
-        holding_registers_size: usize,
-        input_registers_size: usize,
-    ) -> Self {
-        let mut coils = vec![false; coils_size];
-        let mut discrete_inputs = vec![false; discrete_inputs_size];
-        let mut holding_registers = vec![0u16; holding_registers_size];
-        let mut input_registers = vec![0u16; input_registers_size];
-        
-        // Initialize with some test data
-        for i in 0..(coils_size.min(100)) {
-            coils[i] = (i % 2) == 0;
-        }
-        
-        for i in 0..(discrete_inputs_size.min(100)) {
-            discrete_inputs[i] = (i % 3) == 0;
-        }
-        
-        for i in 0..(holding_registers_size.min(100)) {
-            holding_registers[i] = 0x1234 + i as u16;
-        }
-        
-        for i in 0..(input_registers_size.min(100)) {
-            input_registers[i] = 0x5678 + i as u16;
-        }
-        
         Self {
-            coils: Arc::new(RwLock::new(coils)),
-            discrete_inputs: Arc::new(RwLock::new(discrete_inputs)),
-            holding_registers: Arc::new(RwLock::new(holding_registers)),
-            input_registers: Arc::new(RwLock::new(input_registers)),
+            coils: Arc::new(RwLock::new(HashMap::new())),
+            discrete_inputs: Arc::new(RwLock::new(HashMap::new())),
+            holding_registers: Arc::new(RwLock::new(HashMap::new())),
+            input_registers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
-    /// Read coils
+    /// Read coils starting at address (function code 0x01)
     pub fn read_coils(&self, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        let coils = self.coils.read().unwrap();
-        let start = address as usize;
-        let end = start + quantity as usize;
+        let coils = self.coils.read().map_err(|_| ModbusError::internal("Failed to lock coils"))?;
+        let mut result = Vec::with_capacity(quantity as usize);
         
-        if end > coils.len() {
-            return Err(ModbusError::invalid_address(address, quantity));
+        for i in 0..quantity {
+            let addr = address.wrapping_add(i);
+            result.push(coils.get(&addr).copied().unwrap_or(false));
         }
         
-        Ok(coils[start..end].to_vec())
+        Ok(result)
     }
     
-    /// Write single coil
-    pub fn write_single_coil(&self, address: u16, value: bool) -> ModbusResult<()> {
-        let mut coils = self.coils.write().unwrap();
-        let addr = address as usize;
-        
-        if addr >= coils.len() {
-            return Err(ModbusError::invalid_address(address, 1));
-        }
-        
-        coils[addr] = value;
+    /// Alias for read_coils using function code naming
+    pub fn read_01(&self, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.read_coils(address, quantity)
+    }
+    
+    /// Write single coil (function code 0x05)
+    pub fn write_05(&self, address: u16, value: bool) -> ModbusResult<()> {
+        let mut coils = self.coils.write().map_err(|_| ModbusError::internal("Failed to lock coils"))?;
+        coils.insert(address, value);
         Ok(())
     }
     
-    /// Write multiple coils
-    pub fn write_multiple_coils(&self, address: u16, values: &[bool]) -> ModbusResult<()> {
-        let mut coils = self.coils.write().unwrap();
-        let start = address as usize;
-        let end = start + values.len();
-        
-        if end > coils.len() {
-            return Err(ModbusError::invalid_address(address, values.len() as u16));
+    /// Write multiple coils (function code 0x0F)
+    pub fn write_0f(&self, address: u16, values: &[bool]) -> ModbusResult<()> {
+        let mut coils = self.coils.write().map_err(|_| ModbusError::internal("Failed to lock coils"))?;
+        for (i, &value) in values.iter().enumerate() {
+            let addr = address.wrapping_add(i as u16);
+            coils.insert(addr, value);
         }
-        
-        coils[start..end].copy_from_slice(values);
         Ok(())
     }
     
-    /// Read discrete inputs
+    /// Read discrete inputs starting at address (function code 0x02)
     pub fn read_discrete_inputs(&self, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
-        let inputs = self.discrete_inputs.read().unwrap();
-        let start = address as usize;
-        let end = start + quantity as usize;
+        let inputs = self.discrete_inputs.read().map_err(|_| ModbusError::internal("Failed to lock discrete inputs"))?;
+        let mut result = Vec::with_capacity(quantity as usize);
         
-        if end > inputs.len() {
-            return Err(ModbusError::invalid_address(address, quantity));
+        for i in 0..quantity {
+            let addr = address.wrapping_add(i);
+            result.push(inputs.get(&addr).copied().unwrap_or(false));
         }
         
-        Ok(inputs[start..end].to_vec())
+        Ok(result)
     }
     
-    /// Read holding registers
+    /// Alias for read_discrete_inputs using function code naming
+    pub fn read_02(&self, address: u16, quantity: u16) -> ModbusResult<Vec<bool>> {
+        self.read_discrete_inputs(address, quantity)
+    }
+    
+    /// Read holding registers starting at address (function code 0x03)
     pub fn read_holding_registers(&self, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        let registers = self.holding_registers.read().unwrap();
-        let start = address as usize;
-        let end = start + quantity as usize;
+        let registers = self.holding_registers.read().map_err(|_| ModbusError::internal("Failed to lock holding registers"))?;
+        let mut result = Vec::with_capacity(quantity as usize);
         
-        if end > registers.len() {
-            return Err(ModbusError::invalid_address(address, quantity));
+        for i in 0..quantity {
+            let addr = address.wrapping_add(i);
+            result.push(registers.get(&addr).copied().unwrap_or(0));
         }
         
-        Ok(registers[start..end].to_vec())
+        Ok(result)
     }
     
-    /// Write single holding register
-    pub fn write_single_register(&self, address: u16, value: u16) -> ModbusResult<()> {
-        let mut registers = self.holding_registers.write().unwrap();
-        let addr = address as usize;
-        
-        if addr >= registers.len() {
-            return Err(ModbusError::invalid_address(address, 1));
-        }
-        
-        registers[addr] = value;
+    /// Alias for read_holding_registers using function code naming
+    pub fn read_03(&self, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.read_holding_registers(address, quantity)
+    }
+    
+    /// Write single register (function code 0x06)
+    pub fn write_06(&self, address: u16, value: u16) -> ModbusResult<()> {
+        let mut registers = self.holding_registers.write().map_err(|_| ModbusError::internal("Failed to lock holding registers"))?;
+        registers.insert(address, value);
         Ok(())
     }
     
-    /// Write multiple holding registers
-    pub fn write_multiple_registers(&self, address: u16, values: &[u16]) -> ModbusResult<()> {
-        let mut registers = self.holding_registers.write().unwrap();
-        let start = address as usize;
-        let end = start + values.len();
-        
-        if end > registers.len() {
-            return Err(ModbusError::invalid_address(address, values.len() as u16));
+    /// Write multiple registers (function code 0x10)
+    pub fn write_10(&self, address: u16, values: &[u16]) -> ModbusResult<()> {
+        let mut registers = self.holding_registers.write().map_err(|_| ModbusError::internal("Failed to lock holding registers"))?;
+        for (i, &value) in values.iter().enumerate() {
+            let addr = address.wrapping_add(i as u16);
+            registers.insert(addr, value);
         }
-        
-        registers[start..end].copy_from_slice(values);
         Ok(())
     }
     
-    /// Read input registers
+    /// Read input registers starting at address (function code 0x04)
     pub fn read_input_registers(&self, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
-        let registers = self.input_registers.read().unwrap();
-        let start = address as usize;
-        let end = start + quantity as usize;
+        let registers = self.input_registers.read().map_err(|_| ModbusError::internal("Failed to lock input registers"))?;
+        let mut result = Vec::with_capacity(quantity as usize);
         
-        if end > registers.len() {
-            return Err(ModbusError::invalid_address(address, quantity));
+        for i in 0..quantity {
+            let addr = address.wrapping_add(i);
+            result.push(registers.get(&addr).copied().unwrap_or(0));
         }
         
-        Ok(registers[start..end].to_vec())
+        Ok(result)
     }
     
-    /// Set input register value (for simulation)
+    /// Alias for read_input_registers using function code naming
+    pub fn read_04(&self, address: u16, quantity: u16) -> ModbusResult<Vec<u16>> {
+        self.read_input_registers(address, quantity)
+    }
+    
+    /// Set input register value (for simulation/testing)
     pub fn set_input_register(&self, address: u16, value: u16) -> ModbusResult<()> {
-        let mut registers = self.input_registers.write().unwrap();
-        let addr = address as usize;
-        
-        if addr >= registers.len() {
-            return Err(ModbusError::invalid_address(address, 1));
-        }
-        
-        registers[addr] = value;
+        let mut registers = self.input_registers.write().map_err(|_| ModbusError::internal("Failed to lock input registers"))?;
+        registers.insert(address, value);
         Ok(())
     }
     
-    /// Set discrete input value (for simulation)
+    /// Set discrete input value (for simulation/testing)
     pub fn set_discrete_input(&self, address: u16, value: bool) -> ModbusResult<()> {
-        let mut inputs = self.discrete_inputs.write().unwrap();
-        let addr = address as usize;
-        
-        if addr >= inputs.len() {
-            return Err(ModbusError::invalid_address(address, 1));
-        }
-        
-        inputs[addr] = value;
+        let mut inputs = self.discrete_inputs.write().map_err(|_| ModbusError::internal("Failed to lock discrete inputs"))?;
+        inputs.insert(address, value);
         Ok(())
     }
     
@@ -232,45 +192,32 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_register_bank_creation() {
-        let bank = ModbusRegisterBank::new();
-        let stats = bank.get_stats();
-        
-        assert_eq!(stats.coils_count, DEFAULT_COILS_SIZE);
-        assert_eq!(stats.holding_registers_count, DEFAULT_HOLDING_REGISTERS_SIZE);
-    }
-    
-    #[test]
-    fn test_read_write_coils() {
+    fn test_coil_operations() {
         let bank = ModbusRegisterBank::new();
         
-        // Write single coil
-        bank.write_single_coil(10, true).unwrap();
-        
-        // Read coils
-        let coils = bank.read_coils(10, 1).unwrap();
+        // Test single coil write and read
+        bank.write_05(10, true).unwrap();
+        let coils = bank.read_01(10, 1).unwrap();
         assert_eq!(coils[0], true);
         
-        // Write multiple coils
-        bank.write_multiple_coils(20, &[true, false, true]).unwrap();
-        let coils = bank.read_coils(20, 3).unwrap();
+        // Test multiple coil operations
+        bank.write_0f(20, &[true, false, true]).unwrap();
+        let coils = bank.read_01(20, 3).unwrap();
         assert_eq!(coils, vec![true, false, true]);
     }
     
     #[test]
-    fn test_read_write_registers() {
+    fn test_register_operations() {
         let bank = ModbusRegisterBank::new();
         
-        // Write single register
-        bank.write_single_register(5, 0xABCD).unwrap();
+        // Test single register write and read
+        bank.write_06(5, 42).unwrap();
+        let registers = bank.read_03(5, 1).unwrap();
+        assert_eq!(registers[0], 42);
         
-        // Read registers
-        let registers = bank.read_holding_registers(5, 1).unwrap();
-        assert_eq!(registers[0], 0xABCD);
-        
-        // Write multiple registers
-        bank.write_multiple_registers(100, &[0x1111, 0x2222, 0x3333]).unwrap();
-        let registers = bank.read_holding_registers(100, 3).unwrap();
-        assert_eq!(registers, vec![0x1111, 0x2222, 0x3333]);
+        // Test multiple register operations
+        bank.write_10(100, &[100, 200, 300]).unwrap();
+        let registers = bank.read_03(100, 3).unwrap();
+        assert_eq!(registers, vec![100, 200, 300]);
     }
 } 

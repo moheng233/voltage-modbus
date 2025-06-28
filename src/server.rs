@@ -165,7 +165,7 @@ impl ModbusTcpServer {
                             }
                             
                             // Process request
-                            match Self::process_request(&buffer[..bytes_read], &register_bank).await {
+                            match Self::handle_request(&buffer[..bytes_read], &register_bank).await {
                                 Ok(response_data) => {
                                     if let Err(e) = stream.write_all(&response_data).await {
                                         error!("Failed to send response to {}: {}", peer_addr, e);
@@ -208,275 +208,218 @@ impl ModbusTcpServer {
     }
     
     /// Process Modbus request
-    async fn process_request(
-        frame: &[u8],
-        register_bank: &Arc<ModbusRegisterBank>,
-    ) -> ModbusResult<Vec<u8>> {
-        if frame.len() < MBAP_HEADER_SIZE + 2 {
-            return Err(ModbusError::frame("Frame too short"));
+    async fn handle_request(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        if data.len() < 8 {
+            return Err(ModbusError::frame("Invalid TCP frame length"));
         }
-        
-        // Parse MBAP header
-        let transaction_id = u16::from_be_bytes([frame[0], frame[1]]);
-        let protocol_id = u16::from_be_bytes([frame[2], frame[3]]);
-        let length = u16::from_be_bytes([frame[4], frame[5]]);
-        let unit_id = frame[6];
-        let function_code = frame[7];
-        
-        if protocol_id != 0 {
-            return Err(ModbusError::frame("Invalid protocol ID"));
-        }
-        
-        if frame.len() < MBAP_HEADER_SIZE + length as usize {
-            return Err(ModbusError::frame("Incomplete frame"));
-        }
-        
-        debug!("Processing request: TID={}, Function=0x{:02x}, Unit={}", 
-               transaction_id, function_code, unit_id);
-        
-        // Parse function and data
-        let data = &frame[MBAP_HEADER_SIZE + 2..MBAP_HEADER_SIZE + length as usize];
-        
-        // Process based on function code
-        let response_data = match function_code {
-            0x01 => Self::handle_read_coils(data, register_bank).await?,
-            0x02 => Self::handle_read_discrete_inputs(data, register_bank).await?,
-            0x03 => Self::handle_read_holding_registers(data, register_bank).await?,
-            0x04 => Self::handle_read_input_registers(data, register_bank).await?,
-            0x05 => Self::handle_write_single_coil(data, register_bank).await?,
-            0x06 => Self::handle_write_single_register(data, register_bank).await?,
-            0x0F => Self::handle_write_multiple_coils(data, register_bank).await?,
-            0x10 => Self::handle_write_multiple_registers(data, register_bank).await?,
+
+        let function_code = data[7];
+        let pdu_data = &data[8..];
+
+        debug!("Processing function code: 0x{:02X}", function_code);
+
+        match function_code {
+            0x01 => Self::handle_read_01(pdu_data, register_bank).await,
+            0x02 => Self::handle_read_02(pdu_data, register_bank).await,
+            0x03 => Self::handle_read_03(pdu_data, register_bank).await,
+            0x04 => Self::handle_read_04(pdu_data, register_bank).await,
+            0x05 => Self::handle_write_05(pdu_data, register_bank).await,
+            0x06 => Self::handle_write_06(pdu_data, register_bank).await,
+            0x0F => Self::handle_write_0f(pdu_data, register_bank).await,
+            0x10 => Self::handle_write_10(pdu_data, register_bank).await,
             _ => {
-                return Err(ModbusError::protocol(format!("Unsupported function code: 0x{:02x}", function_code)));
+                warn!("Unsupported function code: 0x{:02X}", function_code);
+                Err(ModbusError::invalid_function(function_code))
             }
-        };
-        
-        // Create response frame
-        let response_length = response_data.len() + 2; // +2 for unit_id and function_code
-        let mut response = Vec::with_capacity(MBAP_HEADER_SIZE + response_length);
-        
-        // MBAP header
-        response.extend_from_slice(&transaction_id.to_be_bytes());
-        response.extend_from_slice(&protocol_id.to_be_bytes());
-        response.extend_from_slice(&(response_length as u16).to_be_bytes());
-        
-        // PDU
-        response.push(unit_id);
-        response.push(function_code);
-        response.extend_from_slice(&response_data);
-        
-        Ok(response)
+        }
     }
     
     /// Handle read coils (0x01)
-    async fn handle_read_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_read_01(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
             return Err(ModbusError::frame("Invalid read coils request"));
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
-        
-        if quantity == 0 || quantity > 2000 {
-            return Err(ModbusError::invalid_data("Invalid quantity"));
-        }
-        
-        let coils = register_bank.read_coils(address, quantity)?;
-        
-        // Pack bits into bytes
+
+        let coils = register_bank.read_01(address, quantity)?;
+
+        // Pack coils into bytes
         let byte_count = (quantity + 7) / 8;
-        let mut response = vec![byte_count as u8];
-        
-        for i in 0..byte_count {
-            let mut byte_value = 0u8;
-            for bit in 0..8 {
-                let coil_index = (i * 8 + bit) as usize;
-                if coil_index < coils.len() && coils[coil_index] {
-                    byte_value |= 1 << bit;
+        let mut response = vec![0x01, byte_count as u8];
+
+        for chunk in coils.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &coil) in chunk.iter().enumerate() {
+                if coil {
+                    byte |= 1 << i;
                 }
             }
-            response.push(byte_value);
+            response.push(byte);
         }
-        
+
         Ok(response)
     }
     
     /// Handle read discrete inputs (0x02)
-    async fn handle_read_discrete_inputs(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_read_02(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
             return Err(ModbusError::frame("Invalid read discrete inputs request"));
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
-        
-        if quantity == 0 || quantity > 2000 {
-            return Err(ModbusError::invalid_data("Invalid quantity"));
-        }
-        
-        let inputs = register_bank.read_discrete_inputs(address, quantity)?;
-        
-        // Pack bits into bytes
+
+        let inputs = register_bank.read_02(address, quantity)?;
+
+        // Pack inputs into bytes
         let byte_count = (quantity + 7) / 8;
-        let mut response = vec![byte_count as u8];
-        
-        for i in 0..byte_count {
-            let mut byte_value = 0u8;
-            for bit in 0..8 {
-                let input_index = (i * 8 + bit) as usize;
-                if input_index < inputs.len() && inputs[input_index] {
-                    byte_value |= 1 << bit;
+        let mut response = vec![0x02, byte_count as u8];
+
+        for chunk in inputs.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &input) in chunk.iter().enumerate() {
+                if input {
+                    byte |= 1 << i;
                 }
             }
-            response.push(byte_value);
+            response.push(byte);
         }
-        
+
         Ok(response)
     }
     
     /// Handle read holding registers (0x03)
-    async fn handle_read_holding_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_read_03(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
-            return Err(ModbusError::frame("Invalid read holding registers request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
-        
-        if quantity == 0 || quantity > 125 {
-            return Err(ModbusError::invalid_data("Invalid quantity"));
-        }
-        
-        let registers = register_bank.read_holding_registers(address, quantity)?;
-        
-        let byte_count = quantity * 2;
-        let mut response = vec![byte_count as u8];
-        
-        for register in registers {
+
+        let registers = register_bank.read_03(address, quantity)?;
+
+        let mut response = vec![0x03, (quantity * 2) as u8];
+        for &register in &registers {
             response.extend_from_slice(&register.to_be_bytes());
         }
-        
+
         Ok(response)
     }
     
     /// Handle read input registers (0x04)
-    async fn handle_read_input_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_read_04(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
-            return Err(ModbusError::frame("Invalid read input registers request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
-        
-        if quantity == 0 || quantity > 125 {
-            return Err(ModbusError::invalid_data("Invalid quantity"));
-        }
-        
-        let registers = register_bank.read_input_registers(address, quantity)?;
-        
-        let byte_count = quantity * 2;
-        let mut response = vec![byte_count as u8];
-        
-        for register in registers {
+
+        let registers = register_bank.read_04(address, quantity)?;
+
+        let mut response = vec![0x04, (quantity * 2) as u8];
+        for &register in &registers {
             response.extend_from_slice(&register.to_be_bytes());
         }
-        
+
         Ok(response)
     }
     
     /// Handle write single coil (0x05)
-    async fn handle_write_single_coil(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_write_05(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
-            return Err(ModbusError::frame("Invalid write single coil request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
-        let value = u16::from_be_bytes([data[2], data[3]]);
-        
-        let coil_value = match value {
-            0x0000 => false,
-            0xFF00 => true,
-            _ => return Err(ModbusError::invalid_data("Invalid coil value")),
-        };
-        
-        register_bank.write_single_coil(address, coil_value)?;
-        
-        // Echo back the request
-        Ok(data.to_vec())
+        let value_bytes = u16::from_be_bytes([data[2], data[3]]);
+        let coil_value = value_bytes == 0xFF00;
+
+        register_bank.write_05(address, coil_value)?;
+
+        let mut response = vec![0x05];
+        response.extend_from_slice(&address.to_be_bytes());
+        response.extend_from_slice(&value_bytes.to_be_bytes());
+        Ok(response)
     }
     
     /// Handle write single register (0x06)
-    async fn handle_write_single_register(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_write_06(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 4 {
-            return Err(ModbusError::frame("Invalid write single register request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let value = u16::from_be_bytes([data[2], data[3]]);
-        
-        register_bank.write_single_register(address, value)?;
-        
-        // Echo back the request
-        Ok(data.to_vec())
+
+        register_bank.write_06(address, value)?;
+
+        let mut response = vec![0x06];
+        response.extend_from_slice(&address.to_be_bytes());
+        response.extend_from_slice(&value.to_be_bytes());
+        Ok(response)
     }
     
     /// Handle write multiple coils (0x0F)
-    async fn handle_write_multiple_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_write_0f(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 5 {
-            return Err(ModbusError::frame("Invalid write multiple coils request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
         let byte_count = data[4] as usize;
-        
+
         if data.len() < 5 + byte_count {
-            return Err(ModbusError::frame("Incomplete write multiple coils request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
-        // Extract coil values from bytes
-        let mut coils = Vec::with_capacity(quantity as usize);
+
+        let mut coils = Vec::new();
         for i in 0..quantity {
-            let byte_index = (i / 8) as usize;
+            let byte_index = 5 + (i / 8) as usize;
             let bit_index = i % 8;
-            let byte_value = data[5 + byte_index];
-            let coil_value = (byte_value & (1 << bit_index)) != 0;
-            coils.push(coil_value);
+            let bit_value = (data[byte_index] & (1 << bit_index)) != 0;
+            coils.push(bit_value);
         }
-        
-        register_bank.write_multiple_coils(address, &coils)?;
-        
-        // Return address and quantity
-        Ok(data[0..4].to_vec())
+
+        register_bank.write_0f(address, &coils)?;
+
+        let mut response = vec![0x0F];
+        response.extend_from_slice(&address.to_be_bytes());
+        response.extend_from_slice(&quantity.to_be_bytes());
+        Ok(response)
     }
     
     /// Handle write multiple registers (0x10)
-    async fn handle_write_multiple_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+    async fn handle_write_10(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
         if data.len() < 5 {
-            return Err(ModbusError::frame("Invalid write multiple registers request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
+
         let address = u16::from_be_bytes([data[0], data[1]]);
         let quantity = u16::from_be_bytes([data[2], data[3]]);
         let byte_count = data[4] as usize;
-        
+
         if data.len() < 5 + byte_count || byte_count != (quantity as usize * 2) {
-            return Err(ModbusError::frame("Incomplete write multiple registers request"));
+            return Err(ModbusError::InvalidFrame);
         }
-        
-        // Extract register values
-        let mut registers = Vec::with_capacity(quantity as usize);
+
+        let mut registers = Vec::new();
         for i in 0..quantity {
-            let offset = 5 + (i as usize * 2);
-            let value = u16::from_be_bytes([data[offset], data[offset + 1]]);
+            let byte_offset = 5 + (i as usize * 2);
+            let value = u16::from_be_bytes([data[byte_offset], data[byte_offset + 1]]);
             registers.push(value);
         }
-        
-        register_bank.write_multiple_registers(address, &registers)?;
-        
-        // Return address and quantity
-        Ok(data[0..4].to_vec())
+
+        register_bank.write_10(address, &registers)?;
+
+        let mut response = vec![0x10];
+        response.extend_from_slice(&address.to_be_bytes());
+        response.extend_from_slice(&quantity.to_be_bytes());
+        Ok(response)
     }
     
     /// Create error response
@@ -682,60 +625,38 @@ impl ModbusRtuServer {
         CRC_MODBUS.checksum(data)
     }
     
-    /// Process RTU frame
-    async fn process_rtu_frame(
-        frame: &[u8],
-        register_bank: &Arc<ModbusRegisterBank>,
-    ) -> ModbusResult<Vec<u8>> {
-        if frame.len() < 4 {
-            return Err(ModbusError::frame("RTU frame too short"));
+    /// Handle RTU request
+    async fn handle_request(&mut self, data: &[u8]) -> ModbusResult<Vec<u8>> {
+        if data.len() < 3 {
+            return Err(ModbusError::frame("Invalid RTU frame length"));
         }
-        
-        // Extract CRC from frame
-        let data_len = frame.len() - 2;
-        let data = &frame[..data_len];
-        let received_crc = u16::from_le_bytes([frame[data_len], frame[data_len + 1]]);
-        
-        // Verify CRC
-        let calculated_crc = Self::calculate_crc(data);
-        if received_crc != calculated_crc {
-            return Err(ModbusError::frame("Invalid CRC"));
-        }
-        
-        if data.len() < 2 {
-            return Err(ModbusError::frame("Invalid RTU frame"));
-        }
-        
+
         let slave_id = data[0];
         let function_code = data[1];
-        let pdu_data = &data[2..];
-        
-        debug!("Processing RTU request: Slave={}, Function=0x{:02x}", slave_id, function_code);
-        
-        // Process based on function code
-        let response_data = match function_code {
-            0x01 => Self::handle_read_coils(pdu_data, register_bank).await?,
-            0x02 => Self::handle_read_discrete_inputs(pdu_data, register_bank).await?,
-            0x03 => Self::handle_read_holding_registers(pdu_data, register_bank).await?,
-            0x04 => Self::handle_read_input_registers(pdu_data, register_bank).await?,
-            0x05 => Self::handle_write_single_coil(pdu_data, register_bank).await?,
-            0x06 => Self::handle_write_single_register(pdu_data, register_bank).await?,
-            0x0F => Self::handle_write_multiple_coils(pdu_data, register_bank).await?,
-            0x10 => Self::handle_write_multiple_registers(pdu_data, register_bank).await?,
+        let pdu_data = &data[2..data.len()-2]; // Remove CRC
+
+        // Verify slave ID matches (or is broadcast)
+        if slave_id != 0 && slave_id != 1 {
+            return Err(ModbusError::device_not_responding(slave_id));
+        }
+
+        let response_pdu = match function_code {
+            0x01 => Self::handle_read_01(pdu_data, &self.register_bank).await?,
+            0x02 => Self::handle_read_02(pdu_data, &self.register_bank).await?,
+            0x03 => Self::handle_read_03(pdu_data, &self.register_bank).await?,
+            0x04 => Self::handle_read_04(pdu_data, &self.register_bank).await?,
+            0x05 => Self::handle_write_05(pdu_data, &self.register_bank).await?,
+            0x06 => Self::handle_write_06(pdu_data, &self.register_bank).await?,
+            0x0F => Self::handle_write_0f(pdu_data, &self.register_bank).await?,
+            0x10 => Self::handle_write_10(pdu_data, &self.register_bank).await?,
             _ => {
-                return Self::create_rtu_error_response(slave_id, function_code, 0x01);
+                return Err(ModbusError::invalid_function(function_code));
             }
         };
-        
-        // Create response frame
-        let mut response = Vec::new();
-        response.push(slave_id);
-        response.push(function_code);
-        response.extend_from_slice(&response_data);
-        
-        // Add CRC
-        let crc = Self::calculate_crc(&response);
-        response.extend_from_slice(&crc.to_le_bytes());
+
+        // Build RTU response: slave_id + function_code + response_data
+        let mut response = vec![slave_id, function_code];
+        response.extend_from_slice(&response_pdu[1..]); // Skip function code from PDU
         
         Ok(response)
     }
@@ -841,66 +762,66 @@ impl ModbusRtuServer {
             let mut stats = stats.lock().await;
             stats.total_requests += 1;
         }
-        
-        match Self::process_rtu_frame(frame, register_bank).await {
+
+        // Create a temporary server instance for processing
+        let mut temp_server = ModbusRtuServer {
+            config: ModbusRtuServerConfig::default(),
+            register_bank: register_bank.clone(),
+            stats: stats.clone(),
+            shutdown_tx: None,
+            is_running: Arc::new(AtomicBool::new(false)),
+            start_time: None,
+        };
+
+        match temp_server.handle_request(frame).await {
             Ok(response) => {
-                if let Err(e) = port.write_all(&response).await {
-                    error!("Failed to send RTU response: {}", e);
-                    let mut stats = stats.lock().await;
-                    stats.failed_requests += 1;
-                } else {
-                    let mut stats = stats.lock().await;
-                    stats.successful_requests += 1;
-                    stats.bytes_sent += response.len() as u64;
+                // Calculate CRC for response
+                let mut response_with_crc = response;
+                let crc = Self::calculate_crc(&response_with_crc);
+                response_with_crc.extend_from_slice(&crc.to_le_bytes());
+                
+                if let Err(e) = port.write_all(&response_with_crc).await {
+                    error!("Failed to write response: {}", e);
                 }
             }
             Err(e) => {
-                error!("Error processing RTU request: {}", e);
-                
-                // Try to send error response if we can determine slave ID and function
-                if frame.len() >= 2 {
-                    if let Ok(error_response) = Self::create_rtu_error_response(frame[0], frame[1], 0x01) {
-                        let _ = port.write_all(&error_response).await;
-                    }
-                }
-                
-                let mut stats = stats.lock().await;
-                stats.failed_requests += 1;
+                error!("Error processing request: {}", e);
+                // Send exception response if needed
             }
         }
     }
     
     // Reuse the same handler methods from TCP server
-    async fn handle_read_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_read_coils(data, register_bank).await
+    async fn handle_read_01(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_01(data, register_bank).await
     }
     
-    async fn handle_read_discrete_inputs(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_read_discrete_inputs(data, register_bank).await
+    async fn handle_read_02(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_02(data, register_bank).await
     }
     
-    async fn handle_read_holding_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_read_holding_registers(data, register_bank).await
+    async fn handle_read_03(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_03(data, register_bank).await
     }
     
-    async fn handle_read_input_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_read_input_registers(data, register_bank).await
+    async fn handle_read_04(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_read_04(data, register_bank).await
     }
     
-    async fn handle_write_single_coil(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_write_single_coil(data, register_bank).await
+    async fn handle_write_05(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_05(data, register_bank).await
     }
     
-    async fn handle_write_single_register(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_write_single_register(data, register_bank).await
+    async fn handle_write_06(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_06(data, register_bank).await
     }
     
-    async fn handle_write_multiple_coils(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_write_multiple_coils(data, register_bank).await
+    async fn handle_write_0f(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_0f(data, register_bank).await
     }
     
-    async fn handle_write_multiple_registers(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
-        ModbusTcpServer::handle_write_multiple_registers(data, register_bank).await
+    async fn handle_write_10(data: &[u8], register_bank: &Arc<ModbusRegisterBank>) -> ModbusResult<Vec<u8>> {
+        ModbusTcpServer::handle_write_10(data, register_bank).await
     }
 }
 
@@ -1104,8 +1025,8 @@ mod tests {
         let register_bank = Arc::new(ModbusRegisterBank::new());
         
         // Set some test values
-        register_bank.write_single_coil(0, true).unwrap();
-        register_bank.write_single_register(0, 0x1234).unwrap();
+        register_bank.write_05(0, true).unwrap();
+        register_bank.write_06(0, 0x1234).unwrap();
         
         let mut server = ModbusTcpServer::new("127.0.0.1:5022").unwrap();
         server.set_register_bank(register_bank.clone());
@@ -1117,5 +1038,21 @@ mod tests {
         
         assert_eq!(coils[0], true);
         assert_eq!(registers[0], 0x1234);
+    }
+
+    #[tokio::test]
+    async fn test_register_operations() {
+        let register_bank = Arc::new(ModbusRegisterBank::new());
+        
+        // Test write operations
+        register_bank.write_05(0, true).unwrap();
+        register_bank.write_06(0, 0x1234).unwrap();
+        
+        // Test read operations
+        let coils = register_bank.read_coils(0, 1).unwrap();
+        assert_eq!(coils, vec![true]);
+        
+        let registers = register_bank.read_holding_registers(0, 1).unwrap();
+        assert_eq!(registers, vec![0x1234]);
     }
 }
