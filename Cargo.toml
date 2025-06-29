@@ -1,13 +1,14 @@
+[workspace]
 [package]
-name = "voltage-modbus"
+name = "voltage_modbus"
 version = "0.3.1"
 edition = "2021"
 authors = ["Evan Liu <evan.liu@voltageenergy.com>"]
 description = "A high-performance Modbus library for Rust with TCP and RTU support"
 license = "MIT"
-homepage = "https://github.com/lyf-zadig/VoltageEMS"
-repository = "https://github.com/lyf-zadig/VoltageEMS"
-documentation = "https://docs.rs/voltage-modbus"
+homepage = "https://github.com/voltage-llc/voltage_modbus"
+repository = "https://github.com/voltage-llc/voltage_modbus"
+documentation = "https://docs.rs/voltage_modbus"
 readme = "README.md"
 keywords = ["modbus", "industrial", "automation", "tcp", "rtu"]
 categories = ["network-programming", "embedded"]
