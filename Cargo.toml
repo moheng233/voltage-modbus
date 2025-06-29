@@ -1,16 +1,16 @@
 [package]
-name = "voltage_modbus"
+name = "voltage-modbus"
 version = "0.3.0"
 edition = "2021"
 authors = ["Evan Liu <evan.liu@voltageenergy.com>"]
-description = "High-performance Modbus TCP/RTU/ASCII implementation for industrial automation and IoT applications"
+description = "A high-performance Modbus library for Rust with TCP and RTU support"
 license = "MIT"
 homepage = "https://github.com/voltage-llc/voltage_modbus"
-repository = "https://github.com/voltage-llc/voltage_modbus"
+repository = "https://github.com/lyf-zadig/VoltageEMS"
 documentation = "https://docs.rs/voltage_modbus"
 readme = "README.md"
-keywords = ["modbus", "industrial", "tcp", "rtu"]
-categories = ["network-programming", "embedded", "hardware-support"]
+keywords = ["modbus", "industrial", "automation", "tcp", "rtu"]
+categories = ["network-programming", "embedded"]
 exclude = [
     ".github/*",
     "test/*",
@@ -115,3 +115,6 @@ panic = "abort"
 
 [profile.bench]
 debug = true 
+
+# Independent workspace configuration
+[workspace] 
