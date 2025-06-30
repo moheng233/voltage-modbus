@@ -234,14 +234,7 @@ impl<T: ModbusTransport + Send + Sync> ModbusClient for GenericModbusClient<T> {
         };
         
         let response = self.execute_request(request).await?;
-        Ok(response.data.chunks(2).filter_map(|chunk| {
-            if chunk.len() >= 2 {
-                Some(u16::from_be_bytes([chunk[0], chunk[1]]))
-            } else {
-                // Handle odd-length data by padding with zero
-                Some(u16::from_be_bytes([chunk[0], 0]))
-            }
-        }).collect())
+        Ok(response.data.chunks(2).map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])).collect())
     }
     
     async fn write_05(&mut self, slave_id: SlaveId, address: u16, value: bool) -> ModbusResult<()> {
