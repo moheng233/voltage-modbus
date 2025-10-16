@@ -5,14 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, error, info, warn};
 use crate::error::{ModbusError, ModbusResult};
-
-/// Default register bank size
-const DEFAULT_COILS_SIZE: usize = 10000;
-const DEFAULT_DISCRETE_INPUTS_SIZE: usize = 10000;
-const DEFAULT_HOLDING_REGISTERS_SIZE: usize = 10000;
-const DEFAULT_INPUT_REGISTERS_SIZE: usize = 10000;
 
 /// Modbus register bank for storing coils, discrete inputs, holding registers, and input registers
 /// 

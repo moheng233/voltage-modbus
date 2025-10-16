@@ -15,7 +15,6 @@ use log::{info, error, debug, warn};
 use tokio_serial;
 
 use crate::error::{ModbusError, ModbusResult};
-use crate::protocol::{ModbusRequest, ModbusResponse, ModbusFunction};
 use crate::register_bank::{ModbusRegisterBank, RegisterBankStats};
 
 /// Maximum frame size for Modbus TCP

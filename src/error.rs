@@ -143,7 +143,6 @@
 /// This module provides comprehensive error handling for all Modbus operations,
 /// including network, protocol, and data validation errors.
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type alias for Modbus operations
